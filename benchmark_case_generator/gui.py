@@ -1,0 +1,820 @@
+"""PySide6 GUI for CaseForge - Benchmark Case Generator."""
+
+import sys
+import json
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGroupBox, QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox,
+    QSpinBox, QFileDialog, QProgressBar, QMessageBox, QSplitter,
+    QListWidget, QListWidgetItem, QCheckBox, QFormLayout, QTabWidget,
+    QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QMenu, QAction, QStatusBar,
+    QFrame, QScrollArea, QSizePolicy
+)
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
+from PySide6.QtGui import QFont, QIcon, QAction
+
+from benchmark_case_generator.client import ClientConfig, ModelClient
+from benchmark_case_generator.diversity import DiversityTracker
+from benchmark_case_generator.storage import GeneratorState, OutputManager
+from benchmark_case_generator.generation import CaseGenerator, DEFAULT_CONCLUSION_DISTRIBUTION, TECHNICAL_DOMAINS, LANGUAGES
+from benchmark_case_generator.models import ExpectedConclusion, Difficulty, CasePlan, GeneratedCase
+
+
+class GenerationWorker(QThread):
+    """Background worker for case generation."""
+    
+    progress = Signal(int, int, str)  # current, total, status
+    case_generated = Signal(object)  # GeneratedCase
+    generation_complete = Signal(list)  # list of GeneratedCase
+    error_occurred = Signal(str)
+    
+    def __init__(
+        self,
+        client_config: ClientConfig,
+        output_dir: str,
+        state_file: str,
+        count: int,
+        languages: list[str],
+        difficulties: list[Difficulty],
+        conclusion_distribution: dict[ExpectedConclusion, float],
+        max_retries: int,
+    ):
+        super().__init__()
+        self.client_config = client_config
+        self.output_dir = output_dir
+        self.state_file = state_file
+        self.count = count
+        self.languages = languages
+        self.difficulties = difficulties
+        self.conclusion_distribution = conclusion_distribution
+        self.max_retries = max_retries
+        self._stop_requested = False
+    
+    def run(self):
+        try:
+            client = ModelClient(self.client_config)
+            
+            # Test connection first
+            if not client.check_health():
+                self.error_occurred.emit("Model endpoint is not reachable")
+                return
+            
+            state = GeneratorState(self.state_file)
+            existing_cases = state.load()
+            
+            output = OutputManager(self.output_dir)
+            output.initialize()
+            
+            tracker = DiversityTracker()
+            tracker.load_cases(existing_cases)
+            
+            if not state.model_identifier:
+                state.initialize(self.client_config.model)
+                state.save()
+            
+            generator = CaseGenerator(
+                client=client,
+                diversity_tracker=tracker,
+                output_manager=output,
+                state=state,
+                conclusion_distribution=self.conclusion_distribution,
+                max_retries=self.max_retries,
+                languages=self.languages if self.languages else LANGUAGES,
+                difficulty=None,  # Will select from difficulties
+            )
+            
+            generated = []
+            starting_count = tracker.case_count
+            
+            for i in range(self.count):
+                if self._stop_requested:
+                    break
+                    
+                case_num = starting_count + i + 1
+                self.progress.emit(case_num, self.count, f"Generating case {case_num}...")
+                
+                # Override difficulty selection
+                if self.difficulties:
+                    import random
+                    generator.difficulty = random.choice(self.difficulties)
+                
+                case = generator._generate_single_case(dry_run=False)
+                if case:
+                    generated.append(case)
+                    tracker.add_case(case)
+                    state.add_case(case)
+                    state.save()
+                    self.case_generated.emit(case)
+                else:
+                    self.progress.emit(case_num, self.count, f"Failed to generate case {case_num}")
+            
+            self.generation_complete.emit(generated)
+            
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+    
+    def stop(self):
+        self._stop_requested = True
+
+
+class ConnectionTester(QThread):
+    """Background worker for testing model connection."""
+    success = Signal(str)
+    failure = Signal(str)
+    
+    def __init__(self, client_config: ClientConfig):
+        super().__init__()
+        self.client_config = client_config
+    
+    def run(self):
+        try:
+            client = ModelClient(self.client_config)
+            if client.check_health():
+                self.success.emit(f"Connected to {self.client_config.base_url}")
+            else:
+                self.failure.emit("Endpoint unreachable or not responding")
+        except Exception as e:
+            self.failure.emit(str(e))
+
+
+class CasePreviewDialog(QDialog):
+    """Dialog for previewing a generated case."""
+    
+    def __init__(self, case: GeneratedCase, parent=None):
+        super().__init__(parent)
+        self.case = case
+        self.setWindowTitle(f"Preview: {case.plan.title}")
+        self.setMinimumSize(800, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Metadata section
+        meta_group = QGroupBox("Case Metadata")
+        meta_layout = QFormLayout(meta_group)
+        meta_layout.addRow("Title:", QLabel(case.plan.title))
+        meta_layout.addRow("Language:", QLabel(case.plan.language))
+        meta_layout.addRow("Domain:", QLabel(case.plan.technical_domain))
+        meta_layout.addRow("Difficulty:", QLabel(case.plan.difficulty.value))
+        meta_layout.addRow("Conclusion Type:", QLabel(case.plan.expected_conclusion.value))
+        meta_layout.addRow("Concept:", QLabel(case.plan.primary_concept))
+        layout.addWidget(meta_group)
+        
+        # Markdown content
+        content_group = QGroupBox("Benchmark Prompt (Markdown)")
+        content_layout = QVBoxLayout(content_group)
+        text_edit = QTextEdit()
+        text_edit.setPlainText(case.markdown_content)
+        text_edit.setReadOnly(True)
+        text_edit.setFont(QFont("Monospace", 9))
+        content_layout.addWidget(text_edit)
+        layout.addWidget(content_group, stretch=1)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class CaseForgeWindow(QMainWindow):
+    """Main application window."""
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("CaseForge - Benchmark Case Generator")
+        self.setMinimumSize(1200, 800)
+        
+        # State
+        self._generated_cases: list[GeneratedCase] = []
+        self._worker: Optional[GenerationWorker] = None
+        self._current_config: Optional[ClientConfig] = None
+        
+        # Load settings
+        self._load_settings()
+        
+        # Setup UI
+        self._setup_ui()
+        self._setup_status_bar()
+        
+        # Load existing cases
+        self._load_existing_cases()
+    
+    def _load_settings(self):
+        """Load saved settings."""
+        settings_path = Path.home() / ".caseforge" / "settings.json"
+        if settings_path.exists():
+            with open(settings_path, "r") as f:
+                self._settings = json.load(f)
+        else:
+            self._settings = {
+                "base_url": "http://localhost:1234/v1",
+                "model": "qwen",
+                "api_key_env": "",
+                "output_dir": "./generated_tests",
+                "state_file": "generator_state.json",
+                "count": 10,
+                "max_retries": 5,
+                "languages": [],
+                "difficulties": ["easy", "medium", "hard"],
+                "conclusion_bug": 0.40,
+                "conclusion_correct": 0.30,
+                "conclusion_unsupported": 0.15,
+                "conclusion_needs_context": 0.10,
+                "conclusion_intentional": 0.05,
+            }
+    
+    def _save_settings(self):
+        """Save current settings."""
+        settings_path = Path.home() / ".caseforge"
+        settings_path.mkdir(parents=True, exist_ok=True)
+        with open(settings_path / "settings.json", "w") as f:
+            json.dump(self._settings, f, indent=2)
+    
+    def _setup_ui(self):
+        """Setup the main user interface."""
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QHBoxLayout(central_widget)
+        
+        # Left panel - Configuration
+        left_panel = self._create_left_panel()
+        main_layout.addWidget(left_panel, stretch=1)
+        
+        # Right panel - Results
+        right_panel = self._create_right_panel()
+        main_layout.addWidget(right_panel, stretch=2)
+    
+    def _create_left_panel(self) -> QWidget:
+        """Create the left configuration panel."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(15)
+        
+        # Model/Provider section
+        provider_group = self._create_provider_group()
+        layout.addWidget(provider_group)
+        
+        # Generation Settings section
+        settings_group = self._create_settings_group()
+        layout.addWidget(settings_group)
+        
+        # Conclusion Distribution section
+        distribution_group = self._create_distribution_group()
+        layout.addWidget(distribution_group)
+        
+        # Generate button
+        self.generate_btn = QPushButton("Generate Cases")
+        self.generate_btn.clicked.connect(self._start_generation)
+        self.generate_btn.setMinimumHeight(50)
+        self.generate_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        layout.addWidget(self.generate_btn)
+        
+        # Progress section
+        self.progress_group = QGroupBox("Generation Progress")
+        progress_layout = QVBoxLayout(self.progress_group)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        progress_layout.addWidget(self.progress_bar)
+        
+        self.status_label = QLabel("Ready")
+        self.status_label.setWordWrap(True)
+        progress_layout.addWidget(self.status_label)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._cancel_generation)
+        self.cancel_btn.setEnabled(False)
+        progress_layout.addWidget(self.cancel_btn)
+        
+        layout.addWidget(self.progress_group)
+        
+        layout.addStretch()
+        
+        return widget
+    
+    def _create_provider_group(self) -> QGroupBox:
+        """Create the provider configuration group."""
+        group = QGroupBox("Model / Provider Configuration")
+        layout = QFormLayout(group)
+        
+        # Base URL
+        self.base_url_input = QLineEdit(self._settings.get("base_url", "http://localhost:1234/v1"))
+        self.base_url_input.setPlaceholderText("http://localhost:1234/v1")
+        layout.addRow("API Endpoint:", self.base_url_input)
+        
+        # Model
+        self.model_input = QLineEdit(self._settings.get("model", "qwen"))
+        self.model_input.setPlaceholderText("qwen")
+        layout.addRow("Model ID:", self.model_input)
+        
+        # API Key Env
+        self.api_key_env_input = QLineEdit(self._settings.get("api_key_env", ""))
+        self.api_key_env_input.setPlaceholderText("OPENAI_API_KEY (optional)")
+        layout.addRow("API Key Env Var:", self.api_key_env_input)
+        
+        # Test Connection button
+        test_btn = QPushButton("Test Connection")
+        test_btn.clicked.connect(self._test_connection)
+        layout.addRow("", test_btn)
+        
+        # Connection status
+        self.connection_status = QLabel("Not tested")
+        self.connection_status.setStyleSheet("color: gray;")
+        layout.addRow("Status:", self.connection_status)
+        
+        return group
+    
+    def _create_settings_group(self) -> QGroupBox:
+        """Create the generation settings group."""
+        group = QGroupBox("Generation Settings")
+        layout = QFormLayout(group)
+        
+        # Number of cases
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(1, 100)
+        self.count_spin.setValue(self._settings.get("count", 10))
+        layout.addRow("Number of Cases:", self.count_spin)
+        
+        # Languages
+        self.language_list = QListWidget()
+        self.language_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.language_list.setMaximumHeight(150)
+        for lang in LANGUAGES:
+            item = QListWidgetItem(lang)
+            self.language_list.addItem(item)
+            if lang in self._settings.get("languages", []):
+                item.setSelected(True)
+        layout.addRow("Languages:", self.language_list)
+        
+        # Difficulties
+        diff_widget = QWidget()
+        diff_layout = QHBoxLayout(diff_widget)
+        diff_layout.setContentsMargins(0, 0, 0, 0)
+        self.diff_easy_cb = QCheckBox("Easy")
+        self.diff_medium_cb = QCheckBox("Medium")
+        self.diff_hard_cb = QCheckBox("Hard")
+        
+        diffs = self._settings.get("difficulties", ["easy", "medium", "hard"])
+        self.diff_easy_cb.setChecked("easy" in diffs)
+        self.diff_medium_cb.setChecked("medium" in diffs)
+        self.diff_hard_cb.setChecked("hard" in diffs)
+        
+        diff_layout.addWidget(self.diff_easy_cb)
+        diff_layout.addWidget(self.diff_medium_cb)
+        diff_layout.addWidget(self.diff_hard_cb)
+        layout.addRow("Difficulties:", diff_widget)
+        
+        # Max retries
+        self.retries_spin = QSpinBox()
+        self.retries_spin.setRange(1, 20)
+        self.retries_spin.setValue(self._settings.get("max_retries", 5))
+        layout.addRow("Max Retries:", self.retries_spin)
+        
+        # Output directory
+        output_widget = QWidget()
+        output_layout = QHBoxLayout(output_widget)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        self.output_dir_input = QLineEdit(self._settings.get("output_dir", "./generated_tests"))
+        output_btn = QPushButton("Browse...")
+        output_btn.clicked.connect(self._browse_output_dir)
+        output_layout.addWidget(self.output_dir_input)
+        output_layout.addWidget(output_btn)
+        layout.addRow("Output Folder:", output_widget)
+        
+        return group
+    
+    def _create_distribution_group(self) -> QGroupBox:
+        """Create the conclusion distribution group."""
+        group = QGroupBox("Expected Result Distribution")
+        layout = QFormLayout(group)
+        
+        # BUG ratio
+        self.bug_ratio_spin = QSpinBox()
+        self.bug_ratio_spin.setRange(0, 100)
+        self.bug_ratio_spin.setValue(int(self._settings.get("conclusion_bug", 40) * 100))
+        self.bug_ratio_spin.setSuffix("%")
+        layout.addRow("Concrete Defect:", self.bug_ratio_spin)
+        
+        # CORRECT ratio
+        self.correct_ratio_spin = QSpinBox()
+        self.correct_ratio_spin.setRange(0, 100)
+        self.correct_ratio_spin.setValue(int(self._settings.get("conclusion_correct", 30) * 100))
+        self.correct_ratio_spin.setSuffix("%")
+        layout.addRow("Correct / Handled:", self.correct_ratio_spin)
+        
+        # UNSUPPORTED ratio
+        self.unsupported_ratio_spin = QSpinBox()
+        self.unsupported_ratio_spin.setRange(0, 100)
+        self.unsupported_ratio_spin.setValue(int(self._settings.get("conclusion_unsupported", 15) * 100))
+        self.unsupported_ratio_spin.setSuffix("%")
+        layout.addRow("Unsupported Evidence:", self.unsupported_ratio_spin)
+        
+        # NEEDS_CONTEXT ratio
+        self.needs_context_ratio_spin = QSpinBox()
+        self.needs_context_ratio_spin.setRange(0, 100)
+        self.needs_context_ratio_spin.setValue(int(self._settings.get("conclusion_needs_context", 10) * 100))
+        self.needs_context_ratio_spin.setSuffix("%")
+        layout.addRow("Needs Context:", self.needs_context_ratio_spin)
+        
+        # INTENTIONAL ratio
+        self.intentional_ratio_spin = QSpinBox()
+        self.intentional_ratio_spin.setRange(0, 100)
+        self.intentional_ratio_spin.setValue(int(self._settings.get("conclusion_intentional", 5) * 100))
+        self.intentional_ratio_spin.setSuffix("%")
+        layout.addRow("Intentional Behavior:", self.intentional_ratio_spin)
+        
+        return group
+    
+    def _create_right_panel(self) -> QWidget:
+        """Create the right results panel."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Table header
+        header_label = QLabel("Generated Cases")
+        header_label.setFont(QFont("Arial", 14, QFont.Bold))
+        layout.addWidget(header_label)
+        
+        # Cases table
+        self.cases_table = QTableWidget()
+        self.cases_table.setColumnCount(7)
+        self.cases_table.setHorizontalHeaderLabels([
+            "#", "Title", "Language", "Domain", "Difficulty", "Result Type", "Status"
+        ])
+        self.cases_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.cases_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.cases_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.cases_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.cases_table)
+        
+        # Action buttons
+        btn_layout = QHBoxLayout()
+        
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.clicked.connect(self._preview_selected)
+        btn_layout.addWidget(self.preview_btn)
+        
+        self.regenerate_btn = QPushButton("Regenerate")
+        self.regenerate_btn.clicked.connect(self._regenerate_selected)
+        btn_layout.addWidget(self.regenerate_btn)
+        
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.clicked.connect(self._delete_selected)
+        btn_layout.addWidget(self.delete_btn)
+        
+        btn_layout.addStretch()
+        
+        self.save_selected_btn = QPushButton("Save Selected")
+        self.save_selected_btn.clicked.connect(self._save_selected)
+        btn_layout.addWidget(self.save_selected_btn)
+        
+        self.save_all_btn = QPushButton("Save All")
+        self.save_all_btn.clicked.connect(self._save_all)
+        btn_layout.addWidget(self.save_all_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        return widget
+    
+    def _setup_status_bar(self):
+        """Setup the status bar."""
+        self.statusBar().showMessage("Ready")
+    
+    def _get_client_config(self) -> ClientConfig:
+        """Get current client configuration."""
+        api_key_env = self.api_key_env_input.text().strip() or None
+        return ClientConfig(
+            base_url=self.base_url_input.text().strip(),
+            model=self.model_input.text().strip(),
+            api_key_env=api_key_env,
+        )
+    
+    def _get_conclusion_distribution(self) -> dict[ExpectedConclusion, float]:
+        """Get conclusion distribution from UI."""
+        total = (
+            self.bug_ratio_spin.value() +
+            self.correct_ratio_spin.value() +
+            self.unsupported_ratio_spin.value() +
+            self.needs_context_ratio_spin.value() +
+            self.intentional_ratio_spin.value()
+        )
+        
+        if total == 0:
+            total = 100
+        
+        return {
+            ExpectedConclusion.BUG: self.bug_ratio_spin.value() / 100.0,
+            ExpectedConclusion.CORRECT: self.correct_ratio_spin.value() / 100.0,
+            ExpectedConclusion.UNSUPPORTED: self.unsupported_ratio_spin.value() / 100.0,
+            ExpectedConclusion.NEEDS_CONTEXT: self.needs_context_ratio_spin.value() / 100.0,
+            ExpectedConclusion.INTENTIONAL: self.intentional_ratio_spin.value() / 100.0,
+        }
+    
+    def _get_languages(self) -> list[str]:
+        """Get selected languages."""
+        selected = [item.text() for item in self.language_list.selectedItems()]
+        return selected if selected else None
+    
+    def _get_difficulties(self) -> list[Difficulty]:
+        """Get selected difficulties."""
+        diffs = []
+        if self.diff_easy_cb.isChecked():
+            diffs.append(Difficulty.EASY)
+        if self.diff_medium_cb.isChecked():
+            diffs.append(Difficulty.MEDIUM)
+        if self.diff_hard_cb.isChecked():
+            diffs.append(Difficulty.HARD)
+        return diffs if diffs else [Difficulty.EASY, Difficulty.MEDIUM, Difficulty.HARD]
+    
+    def _test_connection(self):
+        """Test the model connection."""
+        config = self._get_client_config()
+        self.connection_status.setText("Testing...")
+        self.connection_status.setStyleSheet("color: blue;")
+        
+        self._tester = ConnectionTester(config)
+        self._tester.success.connect(self._on_connection_success)
+        self._tester.failure.connect(self._on_connection_failure)
+        self._tester.start()
+    
+    def _on_connection_success(self, message):
+        self.connection_status.setText("✓ Connected")
+        self.connection_status.setStyleSheet("color: green;")
+        QMessageBox.information(self, "Connection Test", message)
+    
+    def _on_connection_failure(self, message):
+        self.connection_status.setText("✗ Failed")
+        self.connection_status.setStyleSheet("color: red;")
+        QMessageBox.warning(self, "Connection Test Failed", message)
+    
+    def _browse_output_dir(self):
+        """Browse for output directory."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", self.output_dir_input.text()
+        )
+        if dir_path:
+            self.output_dir_input.setText(dir_path)
+    
+    def _load_existing_cases(self):
+        """Load existing cases from state file."""
+        state_file = self._settings.get("state_file", "generator_state.json")
+        state = GeneratorState(state_file)
+        existing = state.load()
+        
+        for case in existing:
+            self._add_case_to_table(case)
+            self._generated_cases.append(case)
+    
+    def _add_case_to_table(self, case: GeneratedCase):
+        """Add a case to the results table."""
+        row = self.cases_table.rowCount()
+        self.cases_table.insertRow(row)
+        
+        self.cases_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+        self.cases_table.setItem(row, 1, QTableWidgetItem(case.plan.title))
+        self.cases_table.setItem(row, 2, QTableWidgetItem(case.plan.language))
+        self.cases_table.setItem(row, 3, QTableWidgetItem(case.plan.technical_domain))
+        self.cases_table.setItem(row, 4, QTableWidgetItem(case.plan.difficulty.value))
+        self.cases_table.setItem(row, 5, QTableWidgetItem(case.plan.expected_conclusion.value))
+        self.cases_table.setItem(row, 6, QTableWidgetItem("Saved"))
+        
+        # Store case reference
+        item = self.cases_table.item(row, 0)
+        item.setData(Qt.UserRole, case)
+    
+    def _start_generation(self):
+        """Start case generation."""
+        # Save settings
+        self._settings["base_url"] = self.base_url_input.text().strip()
+        self._settings["model"] = self.model_input.text().strip()
+        self._settings["api_key_env"] = self.api_key_env_input.text().strip()
+        self._settings["output_dir"] = self.output_dir_input.text().strip()
+        self._settings["state_file"] = "generator_state.json"
+        self._settings["count"] = self.count_spin.value()
+        self._settings["max_retries"] = self.retries_spin.value()
+        self._settings["languages"] = self._get_languages() or []
+        self._settings["difficulties"] = [d.value for d in self._get_difficulties()]
+        self._settings["conclusion_bug"] = self.bug_ratio_spin.value() / 100.0
+        self._settings["conclusion_correct"] = self.correct_ratio_spin.value() / 100.0
+        self._settings["conclusion_unsupported"] = self.unsupported_ratio_spin.value() / 100.0
+        self._settings["conclusion_needs_context"] = self.needs_context_ratio_spin.value() / 100.0
+        self._settings["conclusion_intentional"] = self.intentional_ratio_spin.value() / 100.0
+        self._save_settings()
+        
+        # Validate
+        if not self._get_difficulties():
+            QMessageBox.warning(self, "Validation Error", "Please select at least one difficulty level.")
+            return
+        
+        # Setup worker
+        config = self._get_client_config()
+        self._current_config = config
+        
+        self._worker = GenerationWorker(
+            client_config=config,
+            output_dir=self.output_dir_input.text(),
+            state_file="generator_state.json",
+            count=self.count_spin.value(),
+            languages=self._get_languages(),
+            difficulties=self._get_difficulties(),
+            conclusion_distribution=self._get_conclusion_distribution(),
+            max_retries=self.retries_spin.value(),
+        )
+        
+        self._worker.progress.connect(self._on_generation_progress)
+        self._worker.case_generated.connect(self._on_case_generated)
+        self._worker.generation_complete.connect(self._on_generation_complete)
+        self._worker.error_occurred.connect(self._on_generation_error)
+        
+        # Update UI
+        self.generate_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(self.count_spin.value())
+        
+        self._worker.start()
+    
+    def _on_generation_progress(self, current: int, total: int, status: str):
+        self.progress_bar.setValue(current)
+        self.status_label.setText(status)
+        self.statusBar().showMessage(status)
+    
+    def _on_case_generated(self, case: GeneratedCase):
+        self._add_case_to_table(case)
+        self._generated_cases.append(case)
+    
+    def _on_generation_complete(self, cases: list):
+        self.generate_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        self.status_label.setText(f"Generation complete: {len(cases)} cases generated")
+        self.statusBar().showMessage(f"Generated {len(cases)} cases")
+        
+        if cases:
+            QMessageBox.information(
+                self,
+                "Generation Complete",
+                f"Successfully generated {len(cases)} benchmark cases."
+            )
+    
+    def _on_generation_error(self, error: str):
+        self.generate_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText(f"Error: {error}")
+        self.statusBar().showMessage(f"Error: {error}")
+        
+        QMessageBox.critical(self, "Generation Error", error)
+    
+    def _cancel_generation(self):
+        """Cancel ongoing generation."""
+        if self._worker:
+            self._worker.stop()
+            self.status_label.setText("Cancelling...")
+    
+    def _get_selected_cases(self) -> list[GeneratedCase]:
+        """Get currently selected cases from table."""
+        cases = []
+        for row in range(self.cases_table.currentRow(), -1, -1):
+            if self.cases_table.item(row, 0):
+                item = self.cases_table.item(row, 0)
+                case = item.data(Qt.UserRole)
+                if case:
+                    cases.append(case)
+        
+        # Also check selected rows
+        selected_rows = set(i.row() for i in self.cases_table.selectedIndex())
+        for row in selected_rows:
+            item = self.cases_table.item(row, 0)
+            if item:
+                case = item.data(Qt.UserRole)
+                if case and case not in cases:
+                    cases.append(case)
+        
+        return cases
+    
+    def _preview_selected(self):
+        """Preview selected case(s)."""
+        cases = self._get_selected_cases()
+        if not cases:
+            # Preview first case if none selected
+            if self._generated_cases:
+                cases = [self._generated_cases[0]]
+            else:
+                QMessageBox.information(self, "No Cases", "No cases available to preview.")
+                return
+        
+        for case in cases:
+            dialog = CasePreviewDialog(case, self)
+            dialog.exec()
+    
+    def _regenerate_selected(self):
+        """Regenerate selected case(s)."""
+        QMessageBox.information(
+            self,
+            "Regenerate",
+            "Regeneration of individual cases will be implemented in a future version.\n\n"
+            "For now, you can generate additional cases with different settings."
+        )
+    
+    def _delete_selected(self):
+        """Delete selected case(s)."""
+        cases = self._get_selected_cases()
+        if not cases:
+            QMessageBox.information(self, "No Selection", "Please select a case to delete.")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete {len(cases)} selected case(s)?\n\nThis will remove them from the list but NOT delete the .md files.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            for case in cases:
+                # Remove from table
+                for row in range(self.cases_table.rowCount()):
+                    item = self.cases_table.item(row, 0)
+                    if item and item.data(Qt.UserRole) == case:
+                        self.cases_table.removeRow(row)
+                        break
+                
+                # Remove from internal list
+                if case in self._generated_cases:
+                    self._generated_cases.remove(case)
+    
+    def _save_selected(self):
+        """Save selected cases (they are already saved, this confirms)."""
+        cases = self._get_selected_cases()
+        if not cases:
+            QMessageBox.information(self, "No Selection", "Please select cases to verify.")
+            return
+        
+        output_dir = self.output_dir_input.text()
+        saved_count = 0
+        for case in cases:
+            filepath = Path(output_dir) / case.filename
+            if filepath.exists():
+                saved_count += 1
+        
+        QMessageBox.information(
+            self,
+            "Save Status",
+            f"{saved_count}/{len(cases)} selected cases are saved to:\n{output_dir}"
+        )
+    
+    def _save_all(self):
+        """Save all cases (they are already saved, this confirms)."""
+        output_dir = self.output_dir_input.text()
+        output_path = Path(output_dir)
+        
+        if not output_path.exists():
+            output_path.mkdir(parents=True, exist_ok=True)
+        
+        saved_count = sum(1 for case in self._generated_cases if (Path(output_dir) / case.filename).exists())
+        
+        QMessageBox.information(
+            self,
+            "Save Status",
+            f"All {len(self._generated_cases)} cases are managed.\n"
+            f"{saved_count} cases have .md files in:\n{output_dir}\n\n"
+            f"Private ground truth is stored in: generator_state.json"
+        )
+
+
+def main():
+    """Main entry point for the GUI application."""
+    app = QApplication(sys.argv)
+    app.setApplicationName("CaseForge")
+    app.setOrganizationName("CaseForge")
+    
+    # Set application style
+    app.setStyle("Fusion")
+    
+    window = CaseForgeWindow()
+    window.show()
+    
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
