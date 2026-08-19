@@ -1,0 +1,2 @@
+[console_scripts]
+generate-tests = benchmark_case_generator.cli:main
