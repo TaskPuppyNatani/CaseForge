@@ -1,4 +1,49 @@
-.venv/
+```
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.ENV
+.ENV.*
+.python-version
+.python-history
+.coverage
+htmlcov/
+.coverage.*
+.nox/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Distribution / packaging
+.Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+MANIFEST
+*.spec
+
+# Generated files
+generator_state.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+```
