@@ -1,12 +1,11 @@
-```gitignore
 # Build artifacts and distributions
 build/
 dist/
-*.spec
 
 # Python compiled files
 *.pyc
 __pycache__/
+.pytest_cache/
 *.pyo
 *.pyd
 
@@ -55,9 +54,6 @@ Thumbs.db
 *.tar.xz
 *.tar.zst
 
-# Debian package files
-debian/
-
 # Executables
 *.exe
 *.dll
@@ -65,4 +61,3 @@ debian/
 *.a
 *.obj
 *.out
-```

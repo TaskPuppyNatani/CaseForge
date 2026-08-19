@@ -16,13 +16,29 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
-from PySide6.QtGui import QFont, QIcon, QAction
+from PySide6.QtGui import QFont, QIcon, QAction, QPixmap
 
+from benchmark_case_generator import __version__
 from benchmark_case_generator.client import ClientConfig, ModelClient
 from benchmark_case_generator.diversity import DiversityTracker
 from benchmark_case_generator.storage import GeneratorState, OutputManager
 from benchmark_case_generator.generation import CaseGenerator, DEFAULT_CONCLUSION_DISTRIBUTION, TECHNICAL_DOMAINS, LANGUAGES
 from benchmark_case_generator.models import ExpectedConclusion, Difficulty, CasePlan, GeneratedCase
+from benchmark_case_generator.resources import (
+    APP_NAME,
+    APP_ORGANIZATION,
+    default_output_dir,
+    default_state_file,
+    load_application_icon,
+    resolve_user_path,
+    resource_path,
+    settings_file,
+)
+from benchmark_case_generator.theme import (
+    BRANDING_GREEN,
+    BRANDING_GREEN_HOVER,
+    taskpuppy_brand_html,
+)
 
 
 class GenerationWorker(QThread):
@@ -187,6 +203,10 @@ class CaseForgeWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("CaseForge - Benchmark Case Generator")
         self.setMinimumSize(1200, 800)
+
+        application_icon = load_application_icon()
+        if not application_icon.isNull():
+            self.setWindowIcon(application_icon)
         
         # State
         self._generated_cases: list[GeneratedCase] = []
@@ -205,17 +225,23 @@ class CaseForgeWindow(QMainWindow):
     
     def _load_settings(self):
         """Load saved settings."""
-        settings_path = Path.home() / ".caseforge" / "settings.json"
+        settings_path = settings_file()
         if settings_path.exists():
-            with open(settings_path, "r") as f:
-                self._settings = json.load(f)
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    self._settings = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                self._settings = {}
         else:
-            self._settings = {
+            self._settings = {}
+
+        self._settings = {
+            **{
                 "base_url": "http://localhost:1234/v1",
                 "model": "qwen",
                 "api_key_env": "",
-                "output_dir": "./generated_tests",
-                "state_file": "generator_state.json",
+                "output_dir": str(default_output_dir()),
+                "state_file": str(default_state_file()),
                 "count": 10,
                 "max_retries": 5,
                 "languages": [],
@@ -225,13 +251,22 @@ class CaseForgeWindow(QMainWindow):
                 "conclusion_unsupported": 0.15,
                 "conclusion_needs_context": 0.10,
                 "conclusion_intentional": 0.05,
-            }
+            },
+            **self._settings,
+        }
+
+        self._settings["output_dir"] = str(
+            resolve_user_path(self._settings["output_dir"])
+        )
+        self._settings["state_file"] = str(
+            resolve_user_path(self._settings["state_file"])
+        )
     
     def _save_settings(self):
         """Save current settings."""
-        settings_path = Path.home() / ".caseforge"
-        settings_path.mkdir(parents=True, exist_ok=True)
-        with open(settings_path / "settings.json", "w") as f:
+        settings_path = settings_file()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(self._settings, f, indent=2)
     
     def _setup_ui(self):
@@ -271,20 +306,20 @@ class CaseForgeWindow(QMainWindow):
         self.generate_btn = QPushButton("Generate Cases")
         self.generate_btn.clicked.connect(self._start_generation)
         self.generate_btn.setMinimumHeight(50)
-        self.generate_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
+        self.generate_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BRANDING_GREEN};
                 color: white;
                 font-size: 16px;
                 font-weight: bold;
                 border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:hover {{
+                background-color: {BRANDING_GREEN_HOVER};
+            }}
+            QPushButton:disabled {{
                 background-color: #cccccc;
-            }
+            }}
         """)
         layout.addWidget(self.generate_btn)
         
@@ -325,6 +360,14 @@ class CaseForgeWindow(QMainWindow):
         self.model_input = QLineEdit(self._settings.get("model", "qwen"))
         self.model_input.setPlaceholderText("qwen")
         layout.addRow("Model ID:", self.model_input)
+
+        # Direct graphical secret entry keeps normal users from needing to
+        # configure an environment variable. It is intentionally never saved
+        # to settings or passed to packaging metadata.
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Optional API key")
+        layout.addRow("API Key:", self.api_key_input)
         
         # API Key Env
         self.api_key_env_input = QLineEdit(self._settings.get("api_key_env", ""))
@@ -449,10 +492,22 @@ class CaseForgeWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Table header
-        header_label = QLabel("Generated Cases")
-        header_label.setFont(QFont("Arial", 14, QFont.Bold))
-        layout.addWidget(header_label)
+        # Small header identity; keep the workflow title and ordinary labels
+        # readable without applying the branding color to the whole panel.
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.caseforge_header_label = QLabel(APP_NAME)
+        self.caseforge_header_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.caseforge_header_label.setStyleSheet(f"color: {BRANDING_GREEN};")
+        header_layout.addWidget(self.caseforge_header_label)
+
+        self.generated_cases_label = QLabel("Generated Cases")
+        self.generated_cases_label.setFont(QFont("Arial", 14, QFont.Bold))
+        header_layout.addWidget(self.generated_cases_label)
+        header_layout.addStretch()
+        layout.addWidget(header_widget)
         
         # Cases table
         self.cases_table = QTableWidget()
@@ -468,6 +523,7 @@ class CaseForgeWindow(QMainWindow):
         
         # Action buttons
         btn_layout = QHBoxLayout()
+        self.action_button_layout = btn_layout
         
         self.preview_btn = QPushButton("Preview")
         self.preview_btn.clicked.connect(self._preview_selected)
@@ -481,7 +537,45 @@ class CaseForgeWindow(QMainWindow):
         self.delete_btn.clicked.connect(self._delete_selected)
         btn_layout.addWidget(self.delete_btn)
         
-        btn_layout.addStretch()
+        # Keep the intended small logo/wordmark in the bottom action row,
+        # between Delete and Save Selected.
+        self.branding_widget = QWidget()
+        self.branding_widget.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        branding_layout = QHBoxLayout(self.branding_widget)
+        branding_layout.setContentsMargins(12, 0, 12, 0)
+        branding_layout.setSpacing(10)
+        branding_layout.setAlignment(Qt.AlignCenter)
+
+        self.branding_logo_label = QLabel()
+        self.branding_logo_label.setAccessibleName("TaskPuppyKreations logo")
+        logo_path = resource_path("assets/rivet_logo.png")
+        if logo_path:
+            logo_pixmap = QPixmap(str(logo_path))
+            if not logo_pixmap.isNull():
+                self.branding_logo_label.setPixmap(
+                    logo_pixmap.scaled(
+                        QSize(44, 44),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+                self.branding_logo_label.setFixedSize(46, 46)
+            else:
+                self.branding_logo_label.hide()
+        else:
+            self.branding_logo_label.hide()
+        branding_layout.addWidget(self.branding_logo_label)
+
+        self.branding_label = QLabel(taskpuppy_brand_html())
+        self.branding_label.setFont(QFont("Arial", 13, QFont.Bold))
+        self.branding_label.setTextFormat(Qt.RichText)
+        self.branding_label.setAccessibleName("TaskPuppyKreations")
+        self.branding_label.setToolTip("TaskPuppyKreations")
+        branding_layout.addWidget(self.branding_label)
+        btn_layout.addWidget(self.branding_widget, stretch=1)
         
         self.save_selected_btn = QPushButton("Save Selected")
         self.save_selected_btn.clicked.connect(self._save_selected)
@@ -501,10 +595,12 @@ class CaseForgeWindow(QMainWindow):
     
     def _get_client_config(self) -> ClientConfig:
         """Get current client configuration."""
+        api_key = self.api_key_input.text().strip() or None
         api_key_env = self.api_key_env_input.text().strip() or None
         return ClientConfig(
             base_url=self.base_url_input.text().strip(),
             model=self.model_input.text().strip(),
+            api_key=api_key,
             api_key_env=api_key_env,
         )
     
@@ -576,7 +672,9 @@ class CaseForgeWindow(QMainWindow):
     
     def _load_existing_cases(self):
         """Load existing cases from state file."""
-        state_file = self._settings.get("state_file", "generator_state.json")
+        state_file = resolve_user_path(
+            self._settings.get("state_file", default_state_file())
+        )
         state = GeneratorState(state_file)
         existing = state.load()
         
@@ -607,8 +705,13 @@ class CaseForgeWindow(QMainWindow):
         self._settings["base_url"] = self.base_url_input.text().strip()
         self._settings["model"] = self.model_input.text().strip()
         self._settings["api_key_env"] = self.api_key_env_input.text().strip()
-        self._settings["output_dir"] = self.output_dir_input.text().strip()
-        self._settings["state_file"] = "generator_state.json"
+        self._settings["output_dir"] = str(
+            resolve_user_path(self.output_dir_input.text().strip() or default_output_dir())
+        )
+        self.output_dir_input.setText(self._settings["output_dir"])
+        self._settings["state_file"] = str(
+            resolve_user_path(self._settings.get("state_file", default_state_file()))
+        )
         self._settings["count"] = self.count_spin.value()
         self._settings["max_retries"] = self.retries_spin.value()
         self._settings["languages"] = self._get_languages() or []
@@ -632,7 +735,7 @@ class CaseForgeWindow(QMainWindow):
         self._worker = GenerationWorker(
             client_config=config,
             output_dir=self.output_dir_input.text(),
-            state_file="generator_state.json",
+            state_file=self._settings["state_file"],
             count=self.count_spin.value(),
             languages=self._get_languages(),
             difficulties=self._get_difficulties(),
@@ -692,21 +795,18 @@ class CaseForgeWindow(QMainWindow):
     
     def _get_selected_cases(self) -> list[GeneratedCase]:
         """Get currently selected cases from table."""
+        # QTableWidget exposes selectedIndexes() (plural). SelectRows causes
+        # one index per selected cell, so deduplicate rows before resolving the
+        # case stored on column zero.
+        selected_rows = sorted(
+            {index.row() for index in self.cases_table.selectedIndexes()}
+        )
         cases = []
-        for row in range(self.cases_table.currentRow(), -1, -1):
-            if self.cases_table.item(row, 0):
-                item = self.cases_table.item(row, 0)
-                case = item.data(Qt.UserRole)
-                if case:
-                    cases.append(case)
-        
-        # Also check selected rows
-        selected_rows = set(i.row() for i in self.cases_table.selectedIndex())
         for row in selected_rows:
             item = self.cases_table.item(row, 0)
             if item:
                 case = item.data(Qt.UserRole)
-                if case and case not in cases:
+                if case:
                     cases.append(case)
         
         return cases
@@ -797,15 +897,21 @@ class CaseForgeWindow(QMainWindow):
             "Save Status",
             f"All {len(self._generated_cases)} cases are managed.\n"
             f"{saved_count} cases have .md files in:\n{output_dir}\n\n"
-            f"Private ground truth is stored in: generator_state.json"
+            f"Private ground truth is stored in: {self._settings['state_file']}"
         )
 
 
 def main():
     """Main entry point for the GUI application."""
     app = QApplication(sys.argv)
-    app.setApplicationName("CaseForge")
-    app.setOrganizationName("CaseForge")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setOrganizationName(APP_ORGANIZATION)
+    app.setApplicationVersion(__version__)
+
+    application_icon = load_application_icon()
+    if not application_icon.isNull():
+        app.setWindowIcon(application_icon)
     
     # Set application style
     app.setStyle("Fusion")
