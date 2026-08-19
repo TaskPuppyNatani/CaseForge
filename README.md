@@ -1,12 +1,8 @@
-# Benchmark Case Generator
+# CaseForge
 
-A standalone Python tool that uses Qwen models to generate software-engineering benchmark test cases for later import into AuditPup.
+**GUI-first desktop application for generating software-engineering benchmark test cases using Qwen models.**
 
-## Purpose
-
-This helper generates complete benchmark prompts as individual Markdown files. Each `.md` file represents one benchmark test that can be imported into AuditPup Model Evaluation.
-
-The generator uses a **two-stage approach** with a configured Qwen model to INVENT genuinely distinct benchmark cases, not just superficial variations.
+CaseForge is a standalone helper tool that uses a configured Qwen model to INVENT new benchmark cases for later import into AuditPup Model Evaluation.
 
 ## Installation
 
@@ -14,236 +10,198 @@ The generator uses a **two-stage approach** with a configured Qwen model to INVE
 pip install -e .
 ```
 
-Or with dev dependencies:
+## Launching the Application
 
+### From Command Line
 ```bash
-pip install -e ".[dev]"
+caseforge
 ```
 
-## CLI Usage
-
+### Or directly with Python
 ```bash
-# Generate 25 test cases
-python -m benchmark_case_generator.cli \
-    --count 25 \
-    --output ./generated_tests \
-    --model qwen
-
-# Using the installed command
-generate-tests \
-    --count 25 \
-    --output ./generated_tests \
-    --model qwen
+python -m benchmark_case_generator.gui
 ```
 
-### Options
+## Features
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--count` | 1 | Number of test cases to generate |
-| `--output` | `./generated_tests` | Output directory for `.md` files |
-| `--model` | `qwen` | Model identifier |
-| `--base-url` | `http://localhost:1234/v1` | OpenAI-compatible API endpoint |
-| `--api-key-env` | None | Environment variable for API key |
-| `--languages` | All supported | Comma-separated language list |
-| `--difficulty` | Mixed | Fixed difficulty: easy/medium/hard |
-| `--bug-ratio` | 0.40 | Ratio of BUG cases (40%) |
-| `--max-retries` | 5 | Maximum retries per case |
-| `--state-file` | `generator_state.json` | Private ground-truth manifest |
-| `--dry-run` | False | Generate without writing files |
-| `--check-health` | False | Test endpoint connectivity |
-| `--smoke-test` | False | Generate 3 smoke-test cases |
+- **Graphical Interface**: No CLI commands to remember - everything is configurable through the GUI
+- **Two-Stage Generation**: Plans are validated for diversity before full case generation
+- **Diversity Protection**: Every generated case must be meaningfully different from existing cases
+- **Private Ground Truth**: Expected answers stored separately from benchmark prompts
+- **Resume Support**: Continue generating cases across sessions without losing diversity tracking
+- **Configurable Conclusion Distribution**: Control mix of BUG, CORRECT, UNSUPPORTED, NEEDS_CONTEXT, and INTENTIONAL cases
+
+## GUI Sections
+
+### Model / Provider Configuration
+- API Endpoint (base URL)
+- Model ID
+- API Key environment variable (optional)
+- Test Connection button
+- Connection status indicator
+
+### Generation Settings
+- Number of cases (1-100)
+- Language selection (multi-select)
+- Difficulty checkboxes (Easy, Medium, Hard)
+- Max retries per case
+- Output folder chooser
+
+### Expected Result Distribution
+- Concrete Defect (BUG): ~40%
+- Correct / Already Handled: ~30%
+- Unsupported by Evidence: ~15%
+- Needs Additional Context: ~10%
+- Intentional Behavior: ~5%
+
+### Generated Cases Panel
+- Table view with Title, Language, Domain, Difficulty, Result Type, Status
+- Preview selected cases
+- Delete from list (files preserved)
+- Save Selected / Save All verification
+
+## How It Works
+
+### Two-Stage Generation
+
+1. **Stage 1 - Case Plan**: The model produces structured JSON describing a proposed case including title, language, technical domain, primary concept, failure mechanism, expected conclusion, difficulty, code shape, and semantic signature.
+
+2. **Diversity Validation**: The plan is checked against all previously accepted cases. Rejected if:
+   - Primary concept duplicates or is too similar (>85%) to existing
+   - Same failure mechanism with similar concept (>60%)
+   - Semantic signature substantially equivalent (>90%)
+   - Code sample too similar (>75%)
+
+3. **Stage 2 - Full Case**: Only after passing diversity validation, the model creates the complete markdown benchmark prompt.
+
+### Output Files
+
+Each accepted case produces:
+- `generated_tests/001_<name>.md` - The benchmark prompt (for AuditPup import)
+- `generator_state.json` - Private ground truth and metadata (never shared)
+
+The `.md` files contain ONLY the prompt text. Expected answers, conclusions, and generation metadata are stored privately in the state file.
 
 ## Model Configuration
 
-The generator works with any OpenAI-compatible chat-completions endpoint:
+CaseForge supports any OpenAI-compatible chat completions endpoint:
 
-```bash
-# Local Qwen server (e.g., LM Studio)
-generate-tests --base-url http://localhost:1234/v1 --model qwen-7b
-
-# Hosted endpoint with API key
-export OPENAI_API_KEY="your-key-here"
-generate-tests \
-    --base-url https://api.provider.com/v1 \
-    --model qwen-max \
-    --api-key-env OPENAI_API_KEY
-```
-
-**Defaults for local development:**
+### Local Qwen Server (LM Studio, etc.)
 - Base URL: `http://localhost:1234/v1`
-- Model: `qwen`
-- No API key required (can be added via env var)
+- Model: `qwen` or your model name
+- API Key: (leave empty for local)
 
-## Two-Stage Generation Design
+### Hosted Provider
+- Base URL: Provider's endpoint
+- Model: Provider's model identifier
+- API Key Env: Set environment variable, e.g., `OPENAI_API_KEY`
 
-### Stage 1: Case Plan
-The model produces structured JSON describing ONE proposed case:
+## Diversity Rules
 
-```json
-{
-  "title": "...",
-  "language": "...",
-  "technical_domain": "...",
-  "primary_concept": "...",
-  "failure_mechanism": "...",
-  "expected_conclusion": "BUG | CORRECT | UNSUPPORTED | NEEDS_CONTEXT | INTENTIONAL",
-  "difficulty": "easy | medium | hard",
-  "code_shape": "...",
-  "semantic_signature": "...",
-  "case_summary": "..."
-}
-```
+CaseForge rejects candidates that reuse substantially the same:
+- Primary concept
+- Failure mechanism  
+- Semantic signature
+- Reasoning challenge
 
-This plan is validated against all previously accepted cases for diversity.
+Changing only programming language, variable names, filenames, surface syntax, or domain nouns does NOT make a case distinct.
 
-### Stage 2: Full Benchmark Case
-Only after the plan passes diversity validation, the model creates the complete markdown benchmark prompt.
+## Existing Concepts (Occupied)
 
-## Diversity-Rejection Rules
-
-A candidate case is rejected if:
-
-1. **Primary concept duplicates** an existing concept (exact or >85% similar)
-2. **Failure mechanism** is the same with similar concept (>60% similar)
-3. **Semantic signature** is substantially equivalent (>90% similar)
-4. **Code similarity** exceeds 75% (token + sequence comparison)
-
-The generator seeds with an initial "already used" catalog from existing benchmarks:
-- Canonicalized value discarded before use
-- Immutable update correctly captured
+The following concepts from existing benchmarks are treated as occupied:
+- Canonicalized value computed but discarded before enqueue/use
+- Immutable update correctly captured and used
 - Write failure incorrectly reports success
-- Swallowed read/IO failure
+- Swallowed read/IO failure leaves invalid/null state
 - Resource/stream not closed
-- Null/blank guard correctly protects
-- Parameterized SQL already safe
-- Sealed result correctly handled
-- Guard occurs after dangerous access
+- Null/blank guard correctly protects later access
+- Parameterized SQL query already safe
+- Explicit sealed success/failure result correctly handled
+- Guard/bounds check occurs after dangerous access
 - Correct try/finally behavior
-- Local-only counter (no race demonstrated)
+- Local-only counter with no demonstrated race
 - Intentional error-handling behavior
 
-As the suite grows, it becomes progressively harder to repeat concepts.
+## Technical Domains
 
-## Private Ground-Truth Design
+Supported domains include:
+- Error handling
+- Resource management
+- Bounds/indexing
+- Nullability
+- Immutability
+- State management
+- Collections
+- Concurrency
+- Locking
+- Async control flow
+- Transactions
+- SQL/database use
+- Serialization/parsing
+- Caching
+- Filesystem behavior
+- Numeric conversion
+- Ownership/lifetime
+- API contracts
+- Iterator/stream lifecycle
+- Validation
+- Cleanup
+- Data transformation
+- Exception propagation
 
-**NEVER** put expected answers in generated `.md` files.
+## Testing
 
-The private manifest (`generator_state.json`) stores for each case:
-- Output filename
-- SHA-256 of benchmark markdown
-- Title, language, technical domain
-- Primary concept, failure mechanism
-- **Expected conclusion** (private)
-- Difficulty, semantic signature
-- **Ground-truth explanation** (private)
-- Evidence description
-- Timestamp, model identifier
-
-The `.md` file is what AuditPup imports. The manifest is for validation only.
-
-## Resume Behavior
-
-The generator supports continuation:
-
-```bash
-# First run: generate 15 cases
-generate-tests --count 15 --output ./generated_tests
-
-# Later: generate 10 more (cases 16-25)
-generate-tests --count 10 --output ./generated_tests
-```
-
-On resume:
-- Loads existing case catalog from `generator_state.json`
-- Includes those concepts in diversity protection
-- Continues numbering from last case
-- Never overwrites previous tests
-- Never resets diversity memory
-
-## Output Structure
-
-```
-generated_tests/
-    001_null_guard_after_validation.md
-    002_async_resource_cleanup.md
-    003_off_by_one_bounds_check.md
-    ...
-
-generator_state.json  # Private ground truth (do not import)
-```
-
-## Automated Tests
-
-Run the test suite:
+Run automated tests (no live provider required):
 
 ```bash
-pytest tests/ -v
+pip install -e ".[dev]"
+pytest
 ```
 
 Tests cover:
-- Generation-state round trip
-- Output numbering
-- Markdown writing
+- Backend component integration
+- Diversity validation
+- Storage round-trip
+- Output numbering and file writing
 - SHA-256 recording
-- Malformed model JSON recovery
-- Duplicate concept rejection
-- Similar mechanism rejection
-- Acceptable distinct-case acceptance
-- Bounded retries
-- Same suite resumed later
-- Existing files never overwritten
-- Credential not serialized
-- Deterministic similarity checks
-- Private ground truth never appears in `.md` output
-
-## Live Smoke Test
-
-If a compatible Qwen endpoint is configured:
-
-```bash
-generate-tests --smoke-test --model qwen
-```
-
-Confirms:
-- ✓ 3 cases are created
-- ✓ All three have different primary concepts
-- ✓ Markdown files contain no ground truth
-- ✓ State manifest contains private expected conclusions
-- ✓ Generated files can be imported as ordinary `.md` prompts
+- Ground truth privacy
+- Provider configuration
+- Error handling
+- Resume behavior
+- GUI/backend separation
 
 ## Limitations
 
-1. **Model dependency**: Requires a working Qwen endpoint. Quality depends on model capability.
-
-2. **No embeddings**: V1 uses deterministic similarity (SequenceMatcher, Jaccard) rather than semantic embeddings. May miss some subtle conceptual overlaps.
-
-3. **Retry bounds**: If retries are exhausted, the generator records the failure and continues rather than creating bogus cases.
-
-4. **Language coverage**: While multiple languages are supported, the model may have varying quality across languages.
-
-5. **No syntax validation**: Generated code is not compiled/validated. Syntax errors may occur if the model produces invalid code.
-
-6. **Single-threaded**: Cases are generated sequentially. Large batches may take time.
+- Requires working Qwen endpoint; quality depends on model
+- Uses deterministic similarity (SequenceMatcher, Jaccard) - no embeddings
+- Gives up after max retries rather than creating bogus cases
+- Generated code not compiled/validated
+- Sequential generation (single-threaded)
 
 ## Project Structure
 
 ```
 benchmark_case_generator/
-    __init__.py       # Package metadata
-    client.py         # OpenAI-compatible API client
-    generation.py     # Two-stage generation logic
-    diversity.py      # Similarity checking and validation
-    models.py         # Data classes (CasePlan, GeneratedCase)
-    storage.py        # State manifest and file management
-    cli.py            # Command-line interface
+    __init__.py          # Package metadata
+    client.py            # OpenAI-compatible API client
+    diversity.py         # Similarity checking and validation
+    generation.py        # Two-stage generation logic
+    gui.py               # PySide6 graphical interface
+    models.py            # Data classes (CasePlan, GeneratedCase)
+    storage.py           # State manifest and file management
 
 tests/
+    test_client.py
     test_diversity.py
     test_generation.py
+    test_gui.py
+    test_models.py
     test_storage.py
-    test_client.py
 
 pyproject.toml
 README.md
 ```
+
+## License
+
+MIT

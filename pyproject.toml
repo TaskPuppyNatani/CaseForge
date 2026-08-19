@@ -3,13 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "benchmark-case-generator"
-version = "1.0.0"
-description = "Generate software-engineering benchmark test cases using Qwen models"
+name = "caseforge"
+version = "2.0.0"
+description = "GUI application for generating software-engineering benchmark test cases using Qwen models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.28.0",
+    "pyside6>=6.5.0",
 ]
 
 [project.optional-dependencies]
@@ -18,8 +19,8 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 
-[project.scripts]
-generate-tests = "benchmark_case_generator.cli:main"
+[project.gui-scripts]
+caseforge = "benchmark_case_generator.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

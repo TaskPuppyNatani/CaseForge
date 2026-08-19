@@ -5,36 +5,25 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-env/
 venv/
 .venv/
-.ENV
-.ENV.*
-.python-version
-.python-history
+.env
+.env.local
+.env.*
+
+# Testing
 .coverage
+coverage/
 htmlcov/
-.coverage.*
-.nox/
 .pytest_cache/
 .mypy_cache/
-.hypothesis/
 
-# Distribution / packaging
-.Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.so
+# Build artifacts
+build/
+dist/
 *.egg-info/
-MANIFEST
-*.spec
 
-# Generated files
-generator_state.json
-
-# IDE
+# Editors
 .vscode/
 .idea/
 *.swp
@@ -46,4 +35,7 @@ generator_state.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary files
+*.tmp
 ```
