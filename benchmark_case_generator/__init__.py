@@ -1,3 +1,4 @@
-"""Benchmark Case Generator - A tool for generating software-engineering benchmark test cases."""
+"""CaseForge - a GUI for generating software-engineering benchmark cases."""
 
-__version__ = "1.0.0"
+# Single application version source used by project metadata and packaging.
+__version__ = "2.0.0"

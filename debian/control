@@ -1,0 +1,13 @@
+Source: caseforge
+Section: devel
+Priority: optional
+Maintainer: TaskPuppyKreations <maintainers@taskpuppykreations.invalid>
+Standards-Version: 4.6.0
+
+Package: caseforge
+Maintainer: TaskPuppyKreations <maintainers@taskpuppykreations.invalid>
+Architecture: amd64
+Depends: libc6 (>= 2.35), libglib2.0-0, libgl1, libx11-6, libxext6, libxkbcommon0
+Description: CaseForge graphical benchmark case generator
+ CaseForge is a PySide6 desktop application for generating software-engineering
+ benchmark cases through an OpenAI-compatible Qwen or LM Studio endpoint.

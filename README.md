@@ -4,23 +4,19 @@
 
 CaseForge is a standalone helper tool that uses a configured Qwen model to INVENT new benchmark cases for later import into AuditPup Model Evaluation.
 
-## Installation
+## Installation and Launching
 
-```bash
-pip install -e .
-```
+On Linux, install the supplied `caseforge_<version>_amd64.deb` with your
+desktop software installer. After installation, launch **CaseForge** from the
+application menu under **Development**. No terminal, Python installation, or
+virtual environment is required for normal use.
 
-## Launching the Application
+Configure the provider endpoint, model, optional API-key environment variable,
+generation settings, and output folder in the graphical interface. Generate,
+preview, and save benchmark cases with the visible GUI controls.
 
-### From Command Line
-```bash
-caseforge
-```
-
-### Or directly with Python
-```bash
-python -m benchmark_case_generator.gui
-```
+Windows source and installer packaging are outside the scope of this Linux
+package pass; the application code remains cross-platform.
 
 ## Features
 
@@ -36,6 +32,7 @@ python -m benchmark_case_generator.gui
 ### Model / Provider Configuration
 - API Endpoint (base URL)
 - Model ID
+- API key (optional, entered graphically and not saved)
 - API Key environment variable (optional)
 - Test Connection button
 - Connection status indicator
@@ -89,12 +86,13 @@ CaseForge supports any OpenAI-compatible chat completions endpoint:
 ### Local Qwen Server (LM Studio, etc.)
 - Base URL: `http://localhost:1234/v1`
 - Model: `qwen` or your model name
-- API Key: (leave empty for local)
+- API Key: leave empty for a local server
 
 ### Hosted Provider
 - Base URL: Provider's endpoint
 - Model: Provider's model identifier
-- API Key Env: Set environment variable, e.g., `OPENAI_API_KEY`
+- API Key: enter it in the graphical field; it is not saved
+- API Key Env: optional environment-variable fallback, e.g., `OPENAI_API_KEY`
 
 ## Diversity Rules
 
@@ -149,13 +147,21 @@ Supported domains include:
 - Data transformation
 - Exception propagation
 
-## Testing
+## Developer packaging and testing
 
-Run automated tests (no live provider required):
+Maintainers can build the Linux package with the repository-local environment:
 
 ```bash
-pip install -e ".[dev]"
-pytest
+./.venv/bin/python packaging/build_deb.py
+```
+
+This produces the one-directory frozen application under `dist/CaseForge/` and
+the installable package at `dist/caseforge_<version>_amd64.deb`.
+
+Run automated tests (no live provider required) with the same environment:
+
+```bash
+./.venv/bin/python -m pytest
 ```
 
 Tests cover:
@@ -188,7 +194,20 @@ benchmark_case_generator/
     generation.py        # Two-stage generation logic
     gui.py               # PySide6 graphical interface
     models.py            # Data classes (CasePlan, GeneratedCase)
+    resources.py         # Cross-platform resources and user-state paths
     storage.py           # State manifest and file management
+    theme.py             # Centralized branding colors
+
+assets/
+    icon.ico             # Application/window icon
+    rivet_logo.png       # Intended TaskPuppyKreations logo
+
+debian/
+    control             # Debian source metadata
+    caseforge.desktop   # Application-menu entry
+
+packaging/
+    build_deb.py        # Maintainer-only frozen/.deb build
 
 tests/
     test_client.py
@@ -199,6 +218,7 @@ tests/
     test_storage.py
 
 pyproject.toml
+CaseForge.spec
 README.md
 ```
 

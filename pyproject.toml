@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "caseforge"
-version = "2.0.0"
+dynamic = ["version"]
 description = "GUI application for generating software-engineering benchmark test cases using Qwen models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,9 @@ caseforge = "benchmark_case_generator.gui:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["benchmark_case_generator*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "benchmark_case_generator.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
