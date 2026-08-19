@@ -669,6 +669,8 @@ class CaseForgeWindow(QMainWindow):
         )
         if dir_path:
             self.output_dir_input.setText(dir_path)
+            self._settings["output_dir"] = str(resolve_user_path(dir_path))
+            self._save_settings()
     
     def _load_existing_cases(self):
         """Load existing cases from state file."""

@@ -238,3 +238,46 @@ def test_gui_settings_save_excludes_api_key_but_persists_ordinary_settings(
     finally:
         reloaded.close()
         reloaded.deleteLater()
+
+
+def test_output_folder_selection_persists_and_restores_without_api_key(
+    window, monkeypatch, tmp_path
+):
+    remembered_output = tmp_path / "remembered-output"
+    fake_api_key = "caseforge-output-folder-test-fake-key"
+
+    window._settings["base_url"] = "https://example.test/v1"
+    window._settings["model"] = "output-folder-model"
+    window._settings["api_key_env"] = "CASEFORGE_OUTPUT_TEST_KEY"
+    window._save_settings()
+    window.base_url_input.setText("https://example.test/v1")
+    window.model_input.setText("output-folder-model")
+    window.api_key_input.setText(fake_api_key)
+    window.api_key_env_input.setText("CASEFORGE_OUTPUT_TEST_KEY")
+    monkeypatch.setattr(
+        gui.QFileDialog,
+        "getExistingDirectory",
+        lambda *args: str(remembered_output),
+    )
+
+    window._browse_output_dir()
+
+    settings_path = gui.settings_file()
+    persisted_text = settings_path.read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert persisted["output_dir"] == str(remembered_output)
+    assert persisted["base_url"] == "https://example.test/v1"
+    assert persisted["model"] == "output-folder-model"
+    assert persisted["api_key_env"] == "CASEFORGE_OUTPUT_TEST_KEY"
+    assert "api_key" not in persisted
+    assert persisted_text.find(fake_api_key) == -1, "fake API key was persisted"
+
+    reloaded = gui.CaseForgeWindow()
+    try:
+        assert reloaded.output_dir_input.text() == str(remembered_output)
+        assert reloaded.base_url_input.text() == "https://example.test/v1"
+        assert reloaded.model_input.text() == "output-folder-model"
+        assert reloaded.api_key_input.text() == ""
+    finally:
+        reloaded.close()
+        reloaded.deleteLater()
