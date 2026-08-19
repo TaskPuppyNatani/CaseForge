@@ -1,54 +1,68 @@
-# Examples
+```gitignore
+# Build artifacts and distributions
+build/
+dist/
+*.spec
 
-    Input:
-    ### Added files:
-    [src/main.py, README.md, config.json]
+# Python compiled files
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
 
-    ### Deleted files:
-    [old/unused.py]
-    ### Modified files:
-    [utils.py]
-    ###current .gitignore Content
-    (empty)
-    Expected Output:
-    (empty — output nothing)
+# Dependencies
+venv/
+.venv/
+.env
+.env.*
+.env.local
 
-# Example 2 (Project with artifacts):
-Input:
-### Added files:
-[pycache/main.cpython-310.pyc, dist/app.js, .env.local, .vscode/settings.json
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
 
-### Deleted files:
-    []
-
-### Modified files:
-[]
-### current .gitignore Content
+# Logs
 *.log
-Expected Output:
-    #Compiled and build artifacts
-    *.pyc
-    pycache/
-    *.o
-    *.obj
-    dist/
-    build/
-    #Dependencies
-    .venv/
-    venv/
-    node_modules/
-    #Logs and temp files
-    *.log
-    *.tmp
-    *.swp
-    #Environment
-    .env
-    .env.local
-    .env.
-    #Editors
-    .vscode/
-    .idea/
-    #Original rules preserved
-    *.log
 
-Final reminder: Output ONLY the .gitignore content. If nothing should be ignored, output NOTHING.
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+
+# Debian package files
+debian/
+
+# Executables
+*.exe
+*.dll
+*.so
+*.a
+*.obj
+*.out
+```
