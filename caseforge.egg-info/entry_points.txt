@@ -1,0 +1,2 @@
+[gui_scripts]
+caseforge = benchmark_case_generator.gui:main

@@ -1,0 +1,260 @@
+Metadata-Version: 2.4
+Name: benchmark-case-generator
+Version: 1.0.0
+Summary: Generate software-engineering benchmark test cases using Qwen models
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.28.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+
+# Benchmark Case Generator
+
+A standalone Python tool that uses Qwen models to generate software-engineering benchmark test cases for later import into AuditPup.
+
+## Purpose
+
+This helper generates complete benchmark prompts as individual Markdown files. Each `.md` file represents one benchmark test that can be imported into AuditPup Model Evaluation.
+
+The generator uses a **two-stage approach** with a configured Qwen model to INVENT genuinely distinct benchmark cases, not just superficial variations.
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+Or with dev dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## CLI Usage
+
+```bash
+# Generate 25 test cases
+python -m benchmark_case_generator.cli \
+    --count 25 \
+    --output ./generated_tests \
+    --model qwen
+
+# Using the installed command
+generate-tests \
+    --count 25 \
+    --output ./generated_tests \
+    --model qwen
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--count` | 1 | Number of test cases to generate |
+| `--output` | `./generated_tests` | Output directory for `.md` files |
+| `--model` | `qwen` | Model identifier |
+| `--base-url` | `http://localhost:1234/v1` | OpenAI-compatible API endpoint |
+| `--api-key-env` | None | Environment variable for API key |
+| `--languages` | All supported | Comma-separated language list |
+| `--difficulty` | Mixed | Fixed difficulty: easy/medium/hard |
+| `--bug-ratio` | 0.40 | Ratio of BUG cases (40%) |
+| `--max-retries` | 5 | Maximum retries per case |
+| `--state-file` | `generator_state.json` | Private ground-truth manifest |
+| `--dry-run` | False | Generate without writing files |
+| `--check-health` | False | Test endpoint connectivity |
+| `--smoke-test` | False | Generate 3 smoke-test cases |
+
+## Model Configuration
+
+The generator works with any OpenAI-compatible chat-completions endpoint:
+
+```bash
+# Local Qwen server (e.g., LM Studio)
+generate-tests --base-url http://localhost:1234/v1 --model qwen-7b
+
+# Hosted endpoint with API key
+export OPENAI_API_KEY="your-key-here"
+generate-tests \
+    --base-url https://api.provider.com/v1 \
+    --model qwen-max \
+    --api-key-env OPENAI_API_KEY
+```
+
+**Defaults for local development:**
+- Base URL: `http://localhost:1234/v1`
+- Model: `qwen`
+- No API key required (can be added via env var)
+
+## Two-Stage Generation Design
+
+### Stage 1: Case Plan
+The model produces structured JSON describing ONE proposed case:
+
+```json
+{
+  "title": "...",
+  "language": "...",
+  "technical_domain": "...",
+  "primary_concept": "...",
+  "failure_mechanism": "...",
+  "expected_conclusion": "BUG | CORRECT | UNSUPPORTED | NEEDS_CONTEXT | INTENTIONAL",
+  "difficulty": "easy | medium | hard",
+  "code_shape": "...",
+  "semantic_signature": "...",
+  "case_summary": "..."
+}
+```
+
+This plan is validated against all previously accepted cases for diversity.
+
+### Stage 2: Full Benchmark Case
+Only after the plan passes diversity validation, the model creates the complete markdown benchmark prompt.
+
+## Diversity-Rejection Rules
+
+A candidate case is rejected if:
+
+1. **Primary concept duplicates** an existing concept (exact or >85% similar)
+2. **Failure mechanism** is the same with similar concept (>60% similar)
+3. **Semantic signature** is substantially equivalent (>90% similar)
+4. **Code similarity** exceeds 75% (token + sequence comparison)
+
+The generator seeds with an initial "already used" catalog from existing benchmarks:
+- Canonicalized value discarded before use
+- Immutable update correctly captured
+- Write failure incorrectly reports success
+- Swallowed read/IO failure
+- Resource/stream not closed
+- Null/blank guard correctly protects
+- Parameterized SQL already safe
+- Sealed result correctly handled
+- Guard occurs after dangerous access
+- Correct try/finally behavior
+- Local-only counter (no race demonstrated)
+- Intentional error-handling behavior
+
+As the suite grows, it becomes progressively harder to repeat concepts.
+
+## Private Ground-Truth Design
+
+**NEVER** put expected answers in generated `.md` files.
+
+The private manifest (`generator_state.json`) stores for each case:
+- Output filename
+- SHA-256 of benchmark markdown
+- Title, language, technical domain
+- Primary concept, failure mechanism
+- **Expected conclusion** (private)
+- Difficulty, semantic signature
+- **Ground-truth explanation** (private)
+- Evidence description
+- Timestamp, model identifier
+
+The `.md` file is what AuditPup imports. The manifest is for validation only.
+
+## Resume Behavior
+
+The generator supports continuation:
+
+```bash
+# First run: generate 15 cases
+generate-tests --count 15 --output ./generated_tests
+
+# Later: generate 10 more (cases 16-25)
+generate-tests --count 10 --output ./generated_tests
+```
+
+On resume:
+- Loads existing case catalog from `generator_state.json`
+- Includes those concepts in diversity protection
+- Continues numbering from last case
+- Never overwrites previous tests
+- Never resets diversity memory
+
+## Output Structure
+
+```
+generated_tests/
+    001_null_guard_after_validation.md
+    002_async_resource_cleanup.md
+    003_off_by_one_bounds_check.md
+    ...
+
+generator_state.json  # Private ground truth (do not import)
+```
+
+## Automated Tests
+
+Run the test suite:
+
+```bash
+pytest tests/ -v
+```
+
+Tests cover:
+- Generation-state round trip
+- Output numbering
+- Markdown writing
+- SHA-256 recording
+- Malformed model JSON recovery
+- Duplicate concept rejection
+- Similar mechanism rejection
+- Acceptable distinct-case acceptance
+- Bounded retries
+- Same suite resumed later
+- Existing files never overwritten
+- Credential not serialized
+- Deterministic similarity checks
+- Private ground truth never appears in `.md` output
+
+## Live Smoke Test
+
+If a compatible Qwen endpoint is configured:
+
+```bash
+generate-tests --smoke-test --model qwen
+```
+
+Confirms:
+- ✓ 3 cases are created
+- ✓ All three have different primary concepts
+- ✓ Markdown files contain no ground truth
+- ✓ State manifest contains private expected conclusions
+- ✓ Generated files can be imported as ordinary `.md` prompts
+
+## Limitations
+
+1. **Model dependency**: Requires a working Qwen endpoint. Quality depends on model capability.
+
+2. **No embeddings**: V1 uses deterministic similarity (SequenceMatcher, Jaccard) rather than semantic embeddings. May miss some subtle conceptual overlaps.
+
+3. **Retry bounds**: If retries are exhausted, the generator records the failure and continues rather than creating bogus cases.
+
+4. **Language coverage**: While multiple languages are supported, the model may have varying quality across languages.
+
+5. **No syntax validation**: Generated code is not compiled/validated. Syntax errors may occur if the model produces invalid code.
+
+6. **Single-threaded**: Cases are generated sequentially. Large batches may take time.
+
+## Project Structure
+
+```
+benchmark_case_generator/
+    __init__.py       # Package metadata
+    client.py         # OpenAI-compatible API client
+    generation.py     # Two-stage generation logic
+    diversity.py      # Similarity checking and validation
+    models.py         # Data classes (CasePlan, GeneratedCase)
+    storage.py        # State manifest and file management
+    cli.py            # Command-line interface
+
+tests/
+    test_diversity.py
+    test_generation.py
+    test_storage.py
+    test_client.py
+
+pyproject.toml
+README.md
+```

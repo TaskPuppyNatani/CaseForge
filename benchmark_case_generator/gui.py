@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QFileDialog, QProgressBar, QMessageBox, QSplitter,
     QListWidget, QListWidgetItem, QCheckBox, QFormLayout, QTabWidget,
     QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QMenu, QAction, QStatusBar,
+    QHeaderView, QAbstractItemView, QMenu, QStatusBar,
     QFrame, QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
