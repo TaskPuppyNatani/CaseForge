@@ -25,6 +25,49 @@ INITIAL_CONCEPTS = frozenset([
 ])
 
 
+_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
+_FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}([`~]{3,})[ \t]*$")
+
+
+def extract_code_from_markdown(markdown: str | None) -> Optional[str]:
+    """Return the first non-empty, properly closed Markdown code fence.
+
+    The info string is intentionally opaque: language names such as ``c++``
+    and ``c#`` are valid without maintaining a language allow-list.  A fence
+    must be closed by the same marker character with at least the opening
+    marker length; inline backticks and stray markers do not qualify.
+    """
+
+    if not isinstance(markdown, str):
+        return None
+
+    lines = markdown.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        opening = _FENCE_OPEN_RE.match(line.rstrip("\r\n"))
+        if opening is None:
+            continue
+
+        marker = opening.group(1)
+        body: list[str] = []
+        for candidate in lines[index + 1 :]:
+            closing = _FENCE_CLOSE_RE.match(candidate.rstrip("\r\n"))
+            if (
+                closing is not None
+                and closing.group(1)[0] == marker[0]
+                and len(closing.group(1)) >= len(marker)
+            ):
+                code = "".join(body)
+                return code if code.strip() else None
+            body.append(candidate)
+
+        # Preserve first-fence semantics: once an opening fence is seen, an
+        # unterminated or empty first block is invalid rather than falling
+        # through to a later block.
+        return None
+
+    return None
+
+
 def normalize_text(text: str) -> str:
     """Normalize text for comparison: lowercase, remove extra whitespace."""
     text = text.lower().strip()
@@ -184,11 +227,7 @@ class DiversityTracker:
 
     def _extract_code_from_markdown(self, markdown: str) -> str:
         """Extract code block content from markdown."""
-        import re
-        match = re.search(r"```(?:\w+)?\n(.*?)```", markdown, re.DOTALL)
-        if match:
-            return match.group(1)
-        return ""
+        return extract_code_from_markdown(markdown) or ""
 
     def add_case(self, case: GeneratedCase) -> None:
         """Add an accepted case to the tracker."""

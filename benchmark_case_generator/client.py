@@ -48,8 +48,12 @@ class ModelClient:
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": temperature or self.config.temperature,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            "temperature": (
+                self.config.temperature if temperature is None else temperature
+            ),
+            "max_tokens": (
+                self.config.max_tokens if max_tokens is None else max_tokens
+            ),
         }
         
         if response_format:

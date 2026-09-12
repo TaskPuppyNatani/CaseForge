@@ -57,6 +57,7 @@ class TestGeneratorState:
         
         assert len(cases) == 1
         assert cases[0].filename == "001_test.md"
+        assert cases[0].markdown_content is None
         assert state.case_count == 1
         assert state.model_identifier == "test-model"
     
@@ -82,7 +83,7 @@ class TestGeneratorState:
             
             case = GeneratedCase(
                 filename="001_save.md",
-                markdown_content="# Save Test",
+                markdown_content="# Save Test\n```python\nreturn 1\n```",
                 markdown_sha256="save123",
                 plan=plan,
                 ground_truth_explanation="explanation",
@@ -104,6 +105,10 @@ class TestGeneratorState:
             assert data["model_identifier"] == "test-model"
             assert len(data["cases"]) == 1
             assert data["cases"][0]["filename"] == "001_save.md"
+            assert data["cases"][0]["markdown_content"] == case.markdown_content
+
+            restored = GeneratorState(str(state_file)).load()[0]
+            assert restored.markdown_content == case.markdown_content
     
     def test_initialize_sets_timestamp(self):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -116,6 +121,20 @@ class TestGeneratorState:
         
         assert state._data["generated_at"] is not None
         assert state._data["model_identifier"] == "test-model"
+
+    def test_model_identity_mismatch_is_rejected_without_mutating_state(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state = GeneratorState(str(state_file))
+        state.initialize("model-a")
+        state.save()
+
+        loaded = GeneratorState(str(state_file))
+        loaded.load()
+        with pytest.raises(ValueError, match="different model"):
+            loaded.ensure_model_compatible("model-b")
+        assert loaded.model_identifier == "model-a"
+
+        loaded.ensure_model_compatible("model-a")
 
 
 class TestOutputManager:

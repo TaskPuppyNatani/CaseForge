@@ -1,13 +1,15 @@
 """Two-stage benchmark case generation."""
 
 import json
+import math
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional
 
 from .models import CasePlan, GeneratedCase, ExpectedConclusion, Difficulty
 from .client import ModelClient
-from .diversity import DiversityTracker
+from .diversity import DiversityTracker, extract_code_from_markdown
 from .storage import OutputManager, GeneratorState
 
 
@@ -51,17 +53,75 @@ LANGUAGES = [
     "C#", "C++", "Ruby", "Kotlin", "Swift"
 ]
 
+_ANSWER_LABEL_RE = re.compile(r"(?<!\w)(?:bug|defect):", re.IGNORECASE)
 
-def _select_conclusion(distribution: dict[ExpectedConclusion, float]) -> ExpectedConclusion:
-    """Select a conclusion based on distribution."""
+
+def _validated_conclusion_distribution(
+    distribution: Mapping[ExpectedConclusion, float],
+) -> tuple[dict[ExpectedConclusion, float], float]:
+    """Validate and copy relative conclusion weights."""
+
+    if not isinstance(distribution, Mapping) or not distribution:
+        raise ValueError("conclusion distribution must contain at least one weight")
+
+    validated: dict[ExpectedConclusion, float] = {}
+    for conclusion, weight in distribution.items():
+        if not isinstance(conclusion, ExpectedConclusion):
+            raise ValueError("conclusion distribution contains an unknown conclusion")
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise ValueError("conclusion weights must be numeric")
+        try:
+            numeric_weight = float(weight)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ValueError(
+                "conclusion weights must be finite and numeric"
+            ) from error
+        if not math.isfinite(numeric_weight) or numeric_weight < 0:
+            raise ValueError("conclusion weights must be finite and non-negative")
+        validated[conclusion] = numeric_weight
+
+    total = sum(validated.values())
+    if not math.isfinite(total):
+        raise ValueError(
+            "conclusion distribution must contain a finite total weight"
+        )
+    if total <= 0:
+        raise ValueError("conclusion distribution must contain a positive total weight")
+    return validated, total
+
+
+def validate_conclusion_distribution(
+    distribution: Mapping[ExpectedConclusion, float],
+) -> dict[ExpectedConclusion, float]:
+    """Validate relative conclusion weights and return a safe copy."""
+
+    validated, _ = _validated_conclusion_distribution(distribution)
+    return validated
+
+
+def _select_conclusion(
+    distribution: Mapping[ExpectedConclusion, float],
+) -> ExpectedConclusion:
+    """Select a conclusion using the actual total of validated weights."""
+
     import random
-    r = random.random()
+
+    validated, total = _validated_conclusion_distribution(distribution)
+    target = random.random() * total
     cumulative = 0.0
-    for conclusion, prob in distribution.items():
-        cumulative += prob
-        if r <= cumulative:
+    last_positive: ExpectedConclusion | None = None
+    for conclusion, weight in validated.items():
+        if weight <= 0:
+            continue
+        last_positive = conclusion
+        cumulative += weight
+        if target < cumulative:
             return conclusion
-    return list(distribution.keys())[-1]
+
+    # random.random() is strictly below 1.0. This is only a floating-point
+    # guard; zero-weight conclusions can never become a fallback bucket.
+    assert last_positive is not None
+    return last_positive
 
 
 class CaseGenerator:
@@ -82,7 +142,11 @@ class CaseGenerator:
         self.tracker = diversity_tracker
         self.output = output_manager
         self.state = state
-        self.distribution = conclusion_distribution or DEFAULT_CONCLUSION_DISTRIBUTION
+        self.distribution = (
+            DEFAULT_CONCLUSION_DISTRIBUTION
+            if conclusion_distribution is None
+            else validate_conclusion_distribution(conclusion_distribution)
+        )
         self.max_retries = max_retries
         self.languages = languages or LANGUAGES
         self.difficulty = difficulty
@@ -116,32 +180,90 @@ class CaseGenerator:
         difficulty = self.difficulty or __import__("random").choice([Difficulty.EASY, Difficulty.MEDIUM, Difficulty.HARD])
         
         plan = None
-        
-        # STAGE 1: Generate case plan
-        for attempt in range(self.max_retries):
+
+        # STAGE 1: Generate and validate a case plan. Every provider request,
+        # including a diversity-recovery request, consumes one bounded plan
+        # attempt. A recovery response is parsed and validated through the
+        # same path as the initial response.
+        plan_attempts = 0
+        while plan_attempts < self.max_retries:
+            plan_attempts += 1
             try:
                 plan_response = self._request_case_plan(conclusion, language, difficulty)
+            except Exception as error:
+                print(f"  Plan generation error (attempt {plan_attempts}): {error}")
+                continue
+
+            try:
                 plan = self._parse_case_plan(plan_response)
-                
-                if not plan:
-                    print(f"  Plan parse failed (attempt {attempt + 1})")
+                if plan is None:
+                    print(f"  Plan parse failed (attempt {plan_attempts})")
                     continue
-                
-                # Validate diversity
-                is_valid, reason = self.tracker.validate_plan(plan)
-                if not is_valid:
-                    print(f"  Diversity check failed: {reason}")
-                    # Request a different concept
-                    self._request_different_plan(reason, conclusion, language, difficulty)
-                    continue
-                
+
+                is_valid, reason = self._validate_plan_target_and_diversity(
+                    plan,
+                    conclusion,
+                    language,
+                    difficulty,
+                )
+            except (AttributeError, TypeError, ValueError) as error:
+                plan = None
+                print(f"  Plan validation error (attempt {plan_attempts}): {error}")
+                continue
+
+            if is_valid:
                 print(f"  Plan accepted: {plan.primary_concept}")
                 break
-                
-            except Exception as e:
-                print(f"  Plan generation error (attempt {attempt + 1}): {e}")
+
+            print(f"  Plan rejected: {reason}")
+            if plan_attempts >= self.max_retries:
+                plan = None
+                break
+
+            # Ask for a targeted recovery and consume its response. There is
+            # no unbounded nested retry: this request also advances the same
+            # plan-attempt budget.
+            plan_attempts += 1
+            try:
+                revised_response = self._request_different_plan(
+                    reason,
+                    conclusion,
+                    language,
+                    difficulty,
+                )
+            except Exception as error:
+                print(f"  Plan recovery error (attempt {plan_attempts}): {error}")
+                plan = None
                 continue
-        else:
+
+            try:
+                revised_plan = self._parse_case_plan(revised_response)
+                if revised_plan is None:
+                    print(f"  Revised plan parse failed (attempt {plan_attempts})")
+                    plan = None
+                    continue
+
+                is_valid, revised_reason = self._validate_plan_target_and_diversity(
+                    revised_plan,
+                    conclusion,
+                    language,
+                    difficulty,
+                )
+            except (AttributeError, TypeError, ValueError) as error:
+                revised_plan = None
+                plan = None
+                print(f"  Revised plan validation error (attempt {plan_attempts}): {error}")
+                continue
+
+            if is_valid:
+                plan = revised_plan
+                print(f"  Revised plan accepted: {plan.primary_concept}")
+                break
+
+            print(f"  Revised plan rejected: {revised_reason}")
+            plan = None
+
+        if plan is None:
             return None
         
         # STAGE 2: Generate full benchmark case
@@ -155,8 +277,7 @@ class CaseGenerator:
                     continue
                 
                 # Extract code for similarity check
-                code_match = re.search(r"```(?:\w+)?\n(.*?)```", markdown, re.DOTALL)
-                code_sample = code_match.group(1) if code_match else None
+                code_sample = extract_code_from_markdown(markdown)
                 
                 # Final diversity check with code
                 is_valid, reason = self.tracker.validate_plan(plan, code_sample)
@@ -196,6 +317,32 @@ class CaseGenerator:
                 continue
         
         return None
+
+    def _validate_plan_target_and_diversity(
+        self,
+        plan: CasePlan,
+        conclusion: ExpectedConclusion,
+        language: str,
+        difficulty: Difficulty,
+    ) -> tuple[bool, str]:
+        """Validate requested plan targets before applying diversity checks."""
+
+        mismatches: list[str] = []
+        if plan.expected_conclusion != conclusion:
+            mismatches.append(
+                f"expected conclusion requested {conclusion.value}, got {plan.expected_conclusion.value}"
+            )
+        if " ".join(plan.language.split()).casefold() != " ".join(language.split()).casefold():
+            mismatches.append(
+                f"language requested {language!r}, got {plan.language!r}"
+            )
+        if plan.difficulty != difficulty:
+            mismatches.append(
+                f"difficulty requested {difficulty.value}, got {plan.difficulty.value}"
+            )
+        if mismatches:
+            return False, "; ".join(mismatches)
+        return self.tracker.validate_plan(plan)
 
     def _request_case_plan(
         self,
@@ -295,6 +442,9 @@ Output ONLY valid JSON with the same structure as before."""
 
     def _parse_case_plan(self, content: str) -> Optional[CasePlan]:
         """Parse JSON response into CasePlan."""
+        if not isinstance(content, str):
+            return None
+
         # Try to extract JSON from the response
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
@@ -361,8 +511,10 @@ Output the complete markdown content only."""
 
     def _validate_markdown(self, markdown: str) -> bool:
         """Validate that markdown has required structure."""
-        # Must have a code block
-        if "```" not in markdown:
+        # Must have a non-empty, properly closed code block. The parser keeps
+        # the first-code-block behavior while accepting punctuation in info
+        # strings such as c++ and c#.
+        if extract_code_from_markdown(markdown) is None:
             return False
         
         # Should not contain obvious answer leaks
@@ -370,8 +522,6 @@ Output the complete markdown content only."""
             "this code contains a bug",
             "this code is safe",
             "this code is correct",
-            "BUG:",
-            "DEFECT:",
             "the problem here",
         ]
         
@@ -379,6 +529,11 @@ Output the complete markdown content only."""
         for pattern in forbidden_patterns:
             if pattern in lower_md:
                 return False
+
+        # Match standalone answer labels while allowing larger identifiers and
+        # words such as "debug:", "nondefect:", and "some_defect:".
+        if _ANSWER_LABEL_RE.search(markdown):
+            return False
         
         return True
 

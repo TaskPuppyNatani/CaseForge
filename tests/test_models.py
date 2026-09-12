@@ -199,15 +199,34 @@ class TestGeneratedCase:
         case = GeneratedCase.from_dict(data)
         assert case.plan.code_shape == ""  # Default value
     
-    def test_to_dict_does_not_include_markdown_content(self, sample_case):
-        """Ensure markdown content is NOT serialized to dict (it's stored separately)."""
+    def test_to_dict_includes_markdown_content(self, sample_case):
+        """Persisted cases retain Markdown for preview and diversity checks."""
         data = sample_case.to_dict()
-        
-        # The markdown_content should NOT be in the dict
-        assert "markdown_content" not in data
-        
-        # But sha256 should be there for verification
+
+        assert data["markdown_content"] == sample_case.markdown_content
         assert "markdown_sha256" in data
+
+    def test_from_dict_without_markdown_marks_legacy_content_unavailable(self):
+        data = {
+            "filename": "004_legacy.md",
+            "markdown_sha256": "legacy123",
+            "title": "Legacy",
+            "language": "Python",
+            "technical_domain": "validation",
+            "primary_concept": "legacy concept",
+            "failure_mechanism": "unknown",
+            "expected_conclusion": "BUG",
+            "difficulty": "easy",
+            "semantic_signature": "legacy_sig",
+            "ground_truth_explanation": "Legacy explanation.",
+            "evidence_description": "Legacy evidence.",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "model_identifier": "legacy-model",
+        }
+
+        restored = GeneratedCase.from_dict(data)
+
+        assert restored.markdown_content is None
     
     def test_ground_truth_not_in_markdown(self, sample_case):
         """Verify ground truth is stored separately from markdown."""

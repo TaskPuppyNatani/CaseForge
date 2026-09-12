@@ -9,9 +9,11 @@ from benchmark_case_generator.diversity import (
     compute_code_similarity,
     concepts_collide,
     DiversityTracker,
+    extract_code_from_markdown,
     INITIAL_CONCEPTS,
 )
 from benchmark_case_generator.models import CasePlan, GeneratedCase, ExpectedConclusion, Difficulty
+from benchmark_case_generator.storage import GeneratorState
 
 
 class TestNormalizeText:
@@ -96,6 +98,26 @@ class TestComputeCodeSimilarity:
         # Should still be similar but not identical
         sim = compute_code_similarity(code1, code2)
         assert 0.5 < sim < 1.0
+
+
+class TestMarkdownCodeExtraction:
+    @pytest.mark.parametrize("tag", ["python", "c++", "c#", "javascript", "rust", "tsx:strict"])
+    def test_accepts_punctuation_bearing_info_strings(self, tag):
+        assert extract_code_from_markdown(f"```{tag}\nvalue()\n```") == "value()\n"
+
+    def test_accepts_untagged_fence(self):
+        assert extract_code_from_markdown("```\nvalue()\n```") == "value()\n"
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "```python\n\n```",
+            "```python\nvalue()",
+            "inline `value()` only",
+        ],
+    )
+    def test_requires_non_empty_closed_fence(self, markdown):
+        assert extract_code_from_markdown(markdown) is None
 
 
 class TestConceptsCollide:
@@ -259,3 +281,55 @@ class TestDiversityTracker:
         tracker.add_case(case)
         summary = tracker.get_existing_concepts_summary()
         assert "summary concept" in summary
+
+    def test_reloaded_markdown_reconstructs_code_diversity(self, tmp_path):
+        plan = CasePlan(
+            title="Persisted Code",
+            language="Python",
+            technical_domain="validation",
+            primary_concept="persisted code concept",
+            failure_mechanism="validation failure",
+            expected_conclusion=ExpectedConclusion.BUG,
+            difficulty=Difficulty.MEDIUM,
+            code_shape="function",
+            semantic_signature="persisted-code-signature",
+            case_summary="summary",
+        )
+        markdown = "# Persisted\n```python\ndef check(value):\n    return value + 1\n```"
+        case = GeneratedCase(
+            filename="001_persisted.md",
+            markdown_content=markdown,
+            markdown_sha256="persisted-sha",
+            plan=plan,
+            ground_truth_explanation="explanation",
+            evidence_description="evidence",
+            timestamp="2024-01-01T00:00:00Z",
+            model_identifier="test-model",
+        )
+        state_file = tmp_path / "state.json"
+        first = GeneratorState(str(state_file))
+        first.initialize("test-model")
+        first.add_case(case)
+        first.save()
+
+        restored = GeneratorState(str(state_file)).load()
+        assert restored[0].markdown_content == markdown
+
+        tracker = DiversityTracker()
+        tracker.load_cases(restored)
+        candidate = CasePlan(
+            title="Different Concept",
+            language="Python",
+            technical_domain="concurrency",
+            primary_concept="different concept after reload",
+            failure_mechanism="different mechanism",
+            expected_conclusion=ExpectedConclusion.BUG,
+            difficulty=Difficulty.MEDIUM,
+            code_shape="function",
+            semantic_signature="different-signature",
+            case_summary="summary",
+        )
+        valid, reason = tracker.validate_plan(candidate, "def check(value):\n    return value + 1\n")
+
+        assert valid is False
+        assert "code sample" in reason.lower()

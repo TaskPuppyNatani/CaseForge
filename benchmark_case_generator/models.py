@@ -1,6 +1,7 @@
 """Models for benchmark case generation."""
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Literal
 from enum import Enum
 
@@ -53,14 +54,42 @@ class CasePlan:
     @classmethod
     def from_dict(cls, data: dict) -> "CasePlan":
         """Create from dictionary."""
+        if not isinstance(data, Mapping):
+            raise ValueError("case plan must be a JSON object")
+
+        text_fields = (
+            "title",
+            "language",
+            "technical_domain",
+            "primary_concept",
+            "failure_mechanism",
+            "expected_conclusion",
+            "difficulty",
+            "code_shape",
+            "semantic_signature",
+            "case_summary",
+        )
+        for field_name in text_fields:
+            value = data.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"case plan field '{field_name}' must be non-empty text"
+                )
+
+        try:
+            expected_conclusion = ExpectedConclusion(data["expected_conclusion"])
+            difficulty = Difficulty(data["difficulty"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("case plan contains an invalid enum value") from error
+
         return cls(
             title=data["title"],
             language=data["language"],
             technical_domain=data["technical_domain"],
             primary_concept=data["primary_concept"],
             failure_mechanism=data["failure_mechanism"],
-            expected_conclusion=ExpectedConclusion(data["expected_conclusion"]),
-            difficulty=Difficulty(data["difficulty"]),
+            expected_conclusion=expected_conclusion,
+            difficulty=difficulty,
             code_shape=data["code_shape"],
             semantic_signature=data["semantic_signature"],
             case_summary=data["case_summary"],
@@ -71,7 +100,9 @@ class CasePlan:
 class GeneratedCase:
     """A fully generated benchmark case with metadata."""
     filename: str
-    markdown_content: str
+    # ``None`` is reserved for legacy state files written before Markdown was
+    # persisted. New generated cases always carry the complete logical text.
+    markdown_content: str | None
     markdown_sha256: str
     plan: CasePlan
     ground_truth_explanation: str
@@ -83,6 +114,7 @@ class GeneratedCase:
         """Convert to dictionary for JSON serialization."""
         return {
             "filename": self.filename,
+            "markdown_content": self.markdown_content,
             "markdown_sha256": self.markdown_sha256,
             "title": self.plan.title,
             "language": self.plan.language,
@@ -113,9 +145,12 @@ class GeneratedCase:
             semantic_signature=data["semantic_signature"],
             case_summary="",
         )
+        markdown_content = data.get("markdown_content")
+        if markdown_content is not None and not isinstance(markdown_content, str):
+            raise ValueError("markdown_content must be text when present")
         return cls(
             filename=data["filename"],
-            markdown_content="",  # Not stored in manifest
+            markdown_content=markdown_content,
             markdown_sha256=data["markdown_sha256"],
             plan=plan,
             ground_truth_explanation=data["ground_truth_explanation"],

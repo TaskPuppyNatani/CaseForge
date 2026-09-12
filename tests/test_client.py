@@ -78,8 +78,8 @@ class TestModelClient:
         payload = call_args[1]["json"]
         assert payload["model"] == "qwen"
         assert payload["messages"] == messages
-        assert "temperature" in payload
-        assert "max_tokens" in payload
+        assert payload["temperature"] == config.temperature
+        assert payload["max_tokens"] == config.max_tokens
     
     def test_chat_completion_with_custom_params(self, mock_session):
         config = ClientConfig()
@@ -98,6 +98,23 @@ class TestModelClient:
         payload = mock_session.post.call_args[1]["json"]
         assert payload["temperature"] == 0.9
         assert payload["max_tokens"] == 100
+
+    def test_optional_numeric_values_preserve_explicit_zero(self, mock_session):
+        config = ClientConfig(temperature=0.7, max_tokens=4096)
+        client = ModelClient(config)
+        mock_response = Mock()
+        mock_response.json.return_value = {"choices": [{"message": {"content": "OK"}}]}
+        mock_session.post.return_value = mock_response
+
+        client.chat_completion(
+            messages=[{"role": "user", "content": "Deterministic"}],
+            temperature=0.0,
+            max_tokens=0,
+        )
+
+        payload = mock_session.post.call_args[1]["json"]
+        assert payload["temperature"] == 0.0
+        assert payload["max_tokens"] == 0
     
     def test_chat_completion_with_response_format(self, mock_session):
         config = ClientConfig()

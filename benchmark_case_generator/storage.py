@@ -62,6 +62,18 @@ class GeneratorState:
     def model_identifier(self) -> Optional[str]:
         return self._data.get("model_identifier")
 
+    def ensure_model_compatible(self, active_model: str) -> None:
+        """Reject resuming persisted cases with a different model identity."""
+
+        persisted_model = self.model_identifier
+        if persisted_model is not None and persisted_model != active_model:
+            # Keep the diagnostic deliberately free of model values and
+            # credentials. Historical provenance remains unchanged.
+            raise ValueError(
+                "Cannot resume this generation state with a different model; "
+                "start a new run for a different model."
+            )
+
 
 class OutputManager:
     """Manages output directory and markdown file writing."""

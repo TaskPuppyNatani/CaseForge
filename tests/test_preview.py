@@ -10,7 +10,9 @@ from PySide6.QtCore import QItemSelectionModel, QSize
 from PySide6.QtWidgets import QSizePolicy
 
 from benchmark_case_generator import gui
+from benchmark_case_generator.client import ClientConfig
 from benchmark_case_generator.models import CasePlan, Difficulty, ExpectedConclusion, GeneratedCase
+from benchmark_case_generator.storage import GeneratorState
 from benchmark_case_generator.theme import BRANDING_GREEN, BRANDING_PURPLE
 
 
@@ -161,6 +163,148 @@ def test_preview_with_no_cases_shows_graphical_message(window, monkeypatch):
 
     assert messages
     assert "No cases available to preview" in messages[0][-1]
+
+
+def test_gui_distribution_rejects_all_zero_and_preserves_single_nonzero(window):
+    for spin in (
+        window.bug_ratio_spin,
+        window.correct_ratio_spin,
+        window.unsupported_ratio_spin,
+        window.needs_context_ratio_spin,
+        window.intentional_ratio_spin,
+    ):
+        spin.setValue(0)
+
+    with pytest.raises(ValueError, match="positive total"):
+        window._get_conclusion_distribution()
+
+    window.bug_ratio_spin.setValue(100)
+    distribution = window._get_conclusion_distribution()
+    assert distribution[ExpectedConclusion.BUG] == 1.0
+    assert distribution[ExpectedConclusion.INTENTIONAL] == 0.0
+
+
+def test_preview_dialog_uses_markdown_restored_from_state(window, tmp_path):
+    source = make_case(7)
+    state_file = tmp_path / "state.json"
+    state = GeneratorState(str(state_file))
+    state.initialize("test-model")
+    state.add_case(source)
+    state.save()
+    restored = GeneratorState(str(state_file)).load()[0]
+
+    dialog = gui.CasePreviewDialog(restored)
+    try:
+        text_edit = dialog.findChild(gui.QTextEdit)
+        assert text_edit is not None
+        assert text_edit.toPlainText() == source.markdown_content
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_generation_worker_rejects_model_drift_before_health_probe(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state = GeneratorState(str(state_file))
+    state.initialize("model-a")
+    state.save()
+    health_calls = []
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def check_health(self):
+            health_calls.append(True)
+            return True
+
+    monkeypatch.setattr(gui, "ModelClient", FakeClient)
+    worker = gui.GenerationWorker(
+        client_config=ClientConfig(model="model-b", api_key="test-secret"),
+        output_dir=str(tmp_path / "output"),
+        state_file=str(state_file),
+        count=1,
+        languages=["Python"],
+        difficulties=[Difficulty.MEDIUM],
+        conclusion_distribution={ExpectedConclusion.BUG: 1.0},
+        max_retries=2,
+    )
+    errors = []
+    worker.error_occurred.connect(errors.append)
+
+    worker.run()
+
+    assert health_calls == []
+    assert errors and "different model" in errors[0]
+    assert "test-secret" not in errors[0]
+    restored_state = GeneratorState(str(state_file))
+    assert restored_state.load() == []
+    assert restored_state.model_identifier == "model-a"
+
+
+def test_generation_worker_allows_same_model_resume_and_generation(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state = GeneratorState(str(state_file))
+    state.initialize("model-a")
+    state.save()
+    calls = []
+    completed = []
+    errors = []
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def check_health(self):
+            calls.append("health")
+            return True
+
+        def chat_completion(self, messages, **kwargs):
+            calls.append("generation")
+            user_content = messages[-1]["content"]
+            if "case plan as JSON" in user_content:
+                content = json.dumps({
+                    "title": "Same Model Case",
+                    "language": "Python",
+                    "technical_domain": "validation",
+                    "primary_concept": "same model resume concept",
+                    "failure_mechanism": "test mechanism",
+                    "expected_conclusion": "BUG",
+                    "difficulty": "medium",
+                    "code_shape": "function",
+                    "semantic_signature": "same-model-signature",
+                    "case_summary": "tests same-model resume",
+                })
+            else:
+                content = "# Case\n```python\nreturn 1\n```"
+            return {"choices": [{"message": {"content": content}}]}
+
+        def extract_content(self, response):
+            return response["choices"][0]["message"]["content"]
+
+    monkeypatch.setattr(gui, "ModelClient", FakeClient)
+    worker = gui.GenerationWorker(
+        client_config=ClientConfig(model="model-a"),
+        output_dir=str(tmp_path / "output"),
+        state_file=str(state_file),
+        count=1,
+        languages=["Python"],
+        difficulties=[Difficulty.MEDIUM],
+        conclusion_distribution={ExpectedConclusion.BUG: 1.0},
+        max_retries=2,
+    )
+    worker.generation_complete.connect(completed.append)
+    worker.error_occurred.connect(errors.append)
+
+    worker.run()
+
+    assert calls[0] == "health"
+    assert calls.count("generation") == 2
+    assert completed and len(completed[0]) == 1
+    assert errors == []
+    restored_state = GeneratorState(str(state_file))
+    assert len(restored_state.load()) == 1
+    assert restored_state.model_identifier == "model-a"
 
 
 def test_branding_is_in_bottom_action_row_and_colors_are_scoped(window):
