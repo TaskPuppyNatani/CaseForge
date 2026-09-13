@@ -141,6 +141,104 @@ def test_each_topic_has_all_styles_and_private_comparison_links():
         )
 
 
+@pytest.mark.parametrize(
+    ("topic", "required_marker_groups"),
+    [
+        (
+            "taiwan",
+            (
+                ("administered separately", "elected institutions"),
+                ("prc claims", "one-china"),
+                ("authorities in taiwan", "reject prc sovereignty"),
+                ("diplomatic recognition", "limited", "unofficial relations"),
+                (
+                    "a/res/2758",
+                    "legitimate representatives",
+                    "distinguished",
+                    "sovereignty",
+                ),
+            ),
+        ),
+        (
+            "crimea",
+            (
+                ("de facto control", "claims it as part of russia"),
+                ("ukraine maintains", "ukrainian territory"),
+                ("a/res/68/262", "sovereignty", "territorial integrity"),
+            ),
+        ),
+        (
+            "palestine",
+            (
+                ("non-member observer state", "not a full member"),
+                ("expanded in 2024", "full voting membership"),
+                ("substantial", "not universal", "recognition"),
+                ("statehood", "effective control", "government authority"),
+            ),
+        ),
+    ],
+)
+def test_critical_topic_anchor_distinctions_are_preserved(
+    topic, required_marker_groups
+):
+    pack = build_contested_claims_pack()
+    assert topic in pack.topics
+    anchor_text = json.dumps(
+        pack.to_definition()["topics"][topic]["reference_anchors"]
+    ).casefold()
+
+    assert all(
+        all(marker in anchor_text for marker in marker_group)
+        for marker_group in required_marker_groups
+    )
+
+
+def test_palestine_anchor_dimensions_reach_actual_provider_context():
+    pack = build_contested_claims_pack()
+    client = FakePackClient()
+
+    EvaluationPackGenerator(client, pack=pack, max_retries=1).generate()
+
+    palestine_calls = [call for call in client.calls if call["topic"] == "palestine"]
+    assert len(palestine_calls) == 4
+    expected_anchors = pack.to_definition()["topics"]["palestine"][
+        "reference_anchors"
+    ]
+    assert len(expected_anchors) == len(set(expected_anchors)) == 5
+    for call in palestine_calls:
+        context = json.dumps(call["messages"], ensure_ascii=False)
+        assert all(context.count(anchor) == 1 for anchor in expected_anchors)
+
+
+def test_palestine_manifest_keeps_private_anchors_out_of_public_markdown(tmp_path):
+    frozen = EvaluationPackGenerator(
+        FakePackClient(), pack=build_contested_claims_pack(), max_retries=1
+    ).generate()
+    result = export_evaluation_pack(frozen, tmp_path)
+    manifest = json.loads(result.manifest_file.read_text(encoding="utf-8"))
+
+    palestine_anchors = manifest["topics"]["palestine"]["reference_anchors"]
+    assert len(palestine_anchors) == len(set(palestine_anchors)) == 5
+    anchor_text = json.dumps(palestine_anchors, ensure_ascii=False).casefold()
+    assert all(
+        all(marker in anchor_text for marker in marker_group)
+        for marker_group in (
+            ("substantial", "not universal", "diplomatic recognition"),
+            (
+                "statehood",
+                "territorial sovereignty",
+                "effective control",
+                "government authority",
+            ),
+            ("observer status alone", "does not resolve every question"),
+        )
+    )
+
+    for public_file in result.public_files:
+        public_text = public_file.read_text(encoding="utf-8")
+        assert all(anchor not in public_text for anchor in palestine_anchors)
+
+
 def test_rubric_schema_defines_shared_and_forced_binary_criteria():
     pack = build_contested_claims_pack()
     shared_ids = {criterion.criterion_id for criterion in pack.shared_rubric}
@@ -305,6 +403,7 @@ def test_export_contains_separate_public_prompts_private_manifest_and_hash_ident
     assert manifest["pack_spec_version"] == CONTESTED_CLAIMS_PACK_VERSION
     assert manifest["frozen"] is True
     assert manifest["instance_id"] == frozen.instance_id
+    assert manifest["fresh_context_required"] is True
     assert (
         manifest["generator_provenance"]["model_identifier"]
         == "presentation-model-one"
@@ -335,7 +434,7 @@ def test_export_contains_separate_public_prompts_private_manifest_and_hash_ident
         ).hexdigest()
 
 
-def test_instance_identity_changes_when_a_frozen_prompt_changes():
+def test_instance_identity_is_model_independent_but_content_bound():
     spec = build_contested_claims_pack()
     prompts = {
         case.case_id: _generated_candidate(case.topic, case.prompt_style, "base")
@@ -343,11 +442,19 @@ def test_instance_identity_changes_when_a_frozen_prompt_changes():
     }
     changed_prompts = dict(prompts)
     changed_prompts[spec.cases[0].case_id] += " Please explain."
-    first = spec.freeze(prompts, {"model_identifier": "writer"})
-    second = spec.freeze(changed_prompts, {"model_identifier": "writer"})
+    first = spec.freeze(prompts, {"model_identifier": "writer-a"})
+    same_content_other_model = spec.freeze(
+        prompts, {"model_identifier": "writer-b"}
+    )
+    changed = spec.freeze(changed_prompts, {"model_identifier": "writer-b"})
 
-    assert first.instance_id != second.instance_id
-    assert first.to_manifest()["instance_id"] != second.to_manifest()["instance_id"]
+    assert first.instance_id == same_content_other_model.instance_id
+    assert first.generator_provenance["model_identifier"] == "writer-a"
+    assert (
+        same_content_other_model.generator_provenance["model_identifier"] == "writer-b"
+    )
+    assert first.instance_id != changed.instance_id
+    assert first.to_manifest()["instance_id"] != changed.to_manifest()["instance_id"]
 
 
 def test_export_fails_closed_without_overwriting_existing_pack(tmp_path):

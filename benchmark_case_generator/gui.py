@@ -2,6 +2,7 @@
 
 import sys
 import json
+from threading import Event
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -33,6 +34,7 @@ from benchmark_case_generator.models import ExpectedConclusion, Difficulty, Case
 from benchmark_case_generator.case_packs import (
     EvaluationPack,
     EvaluationPackGenerator,
+    PackGenerationCancelled,
     export_evaluation_pack,
     get_builtin_evaluation_pack,
     get_builtin_evaluation_packs,
@@ -161,6 +163,7 @@ class EvaluationPackWorker(QThread):
 
     progress = Signal(int, int, str)
     generation_complete = Signal(object)  # frozen EvaluationPack
+    cancelled = Signal()
     error_occurred = Signal(str)
 
     def __init__(
@@ -173,9 +176,13 @@ class EvaluationPackWorker(QThread):
         self.client_config = client_config
         self.pack = pack
         self.max_retries = max_retries
+        self._stop_requested = Event()
 
     def run(self):
         try:
+            if self._stop_requested.is_set():
+                self.cancelled.emit()
+                return
             client = ModelClient(self.client_config)
             generator = EvaluationPackGenerator(
                 client=client,
@@ -185,11 +192,21 @@ class EvaluationPackWorker(QThread):
             frozen_pack = generator.generate(
                 progress_callback=lambda current, total, status: self.progress.emit(
                     current, total, status
-                )
+                ),
+                cancel_requested=self._stop_requested.is_set,
             )
+            if self._stop_requested.is_set():
+                self.cancelled.emit()
+                return
             self.generation_complete.emit(frozen_pack)
+        except PackGenerationCancelled:
+            self.cancelled.emit()
         except Exception as error:
             self.error_occurred.emit(str(error))
+
+    def stop(self):
+        """Request cooperative cancellation at the next safe boundary."""
+        self._stop_requested.set()
 
 
 class ConnectionTester(QThread):
@@ -654,6 +671,7 @@ class CaseForgeWindow(QMainWindow):
         )
         self._pack_worker.progress.connect(self._on_pack_progress)
         self._pack_worker.generation_complete.connect(self._on_pack_generation_complete)
+        self._pack_worker.cancelled.connect(self._on_pack_generation_cancelled)
         self._pack_worker.error_occurred.connect(self._on_pack_generation_error)
         self._pack_worker.start()
 
@@ -688,6 +706,14 @@ class CaseForgeWindow(QMainWindow):
         self.pack_status_label.setText(f"Generation error: {error}")
         self.statusBar().showMessage(f"Pack generation error: {error}")
         QMessageBox.critical(self, "Pack Generation Error", error)
+
+    def _on_pack_generation_cancelled(self):
+        self._frozen_evaluation_pack = None
+        self.generate_pack_button.setEnabled(True)
+        self.preview_pack_button.setEnabled(False)
+        self.export_pack_button.setEnabled(False)
+        self.pack_status_label.setText("Pack generation cancelled")
+        self.statusBar().showMessage("Evaluation pack generation cancelled")
 
     def _preview_frozen_pack(self):
         """Preview only the generated public prompts."""
@@ -1135,6 +1161,30 @@ class CaseForgeWindow(QMainWindow):
             f"{saved_count} cases have .md files in:\n{output_dir}\n\n"
             f"Private ground truth is stored in: {self._settings['state_file']}"
         )
+
+    def closeEvent(self, event):
+        """Stop active background work before the window and threads are destroyed."""
+        workers = [
+            self._pack_worker,
+            self._worker,
+            getattr(self, "_tester", None),
+        ]
+        active_workers = [
+            worker
+            for worker in workers
+            if worker is not None
+            and callable(getattr(worker, "isRunning", None))
+            and worker.isRunning()
+        ]
+
+        for worker in active_workers:
+            stop = getattr(worker, "stop", None)
+            if callable(stop):
+                stop()
+        for worker in active_workers:
+            worker.wait()
+
+        event.accept()
 
 
 def main():

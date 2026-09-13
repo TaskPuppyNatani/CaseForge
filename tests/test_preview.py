@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -326,6 +327,7 @@ def test_builtin_pack_generate_starts_provider_worker_and_disables_export(
             starts.append((client_config, pack, max_retries))
             self.progress = FakeSignal()
             self.generation_complete = FakeSignal()
+            self.cancelled = FakeSignal()
             self.error_occurred = FakeSignal()
 
         def start(self):
@@ -341,6 +343,59 @@ def test_builtin_pack_generate_starts_provider_worker_and_disables_export(
     assert window.generate_pack_btn.isEnabled() is False
     assert window.preview_pack_btn.isEnabled() is False
     assert window.export_pack_btn.isEnabled() is False
+
+
+def test_builtin_pack_close_cancels_active_worker_before_destruction(
+    window, qapp, monkeypatch
+):
+    provider_started = threading.Event()
+    allow_provider_return = threading.Event()
+    stop_called = threading.Event()
+    calls = []
+
+    class BlockingClient:
+        def __init__(self, config):
+            self.config = SimpleNamespace(model=config.model, max_tokens=512)
+
+        def chat_completion(self, messages, **kwargs):
+            calls.append(messages[-1]["content"])
+            provider_started.set()
+            assert allow_provider_return.wait(5), "test provider was not released"
+            return {"choices": [{"message": {"content": "not a question"}}]}
+
+        def extract_content(self, response):
+            return response["choices"][0]["message"]["content"]
+
+    monkeypatch.setattr(gui, "ModelClient", BlockingClient)
+    window._generate_selected_pack()
+    worker = window._pack_worker
+    assert worker is not None
+    completed = []
+    cancelled = []
+    worker.generation_complete.connect(completed.append)
+    worker.cancelled.connect(lambda: cancelled.append(True))
+    assert provider_started.wait(2)
+    assert worker.isRunning()
+
+    original_stop = worker.stop
+
+    def stop_and_release():
+        stop_called.set()
+        original_stop()
+        allow_provider_return.set()
+
+    monkeypatch.setattr(worker, "stop", stop_and_release)
+    window.close()
+
+    assert stop_called.is_set()
+    assert len(calls) == 1
+    assert not worker.isRunning()
+    assert worker.isFinished()
+    assert window._frozen_evaluation_pack is None
+    assert window.export_pack_btn.isEnabled() is False
+    qapp.processEvents()
+    assert completed == []
+    assert cancelled == [True]
 
 
 def test_builtin_pack_worker_generation_freezes_prompts_and_export_uses_frozen_text(

@@ -446,6 +446,17 @@ _PRESENTATION_OBJECTIVES: Mapping[PromptStyle, str] = {
     ),
 }
 
+
+_PALESTINE_REFERENCE_DEFINITION = ReferenceSource(
+    "palestine",
+    "CaseForge",
+    "Canonical Palestine status-dimension anchor definition",
+    CONTESTED_CLAIMS_AS_OF_DATE,
+    "Fixed evaluator truth definition",
+    _TOPIC_ANCHORS["palestine"],
+)
+
+
 _REFERENCE_SOURCES: tuple[ReferenceSource, ...] = (
     ReferenceSource(
         "taiwan",
@@ -519,6 +530,7 @@ _REFERENCE_SOURCES: tuple[ReferenceSource, ...] = (
         "Current UN status reference",
         (_TOPIC_ANCHORS["palestine"][0],),
     ),
+    _PALESTINE_REFERENCE_DEFINITION,
 )
 
 
@@ -581,6 +593,10 @@ class PackGenerationError(RuntimeError):
         super().__init__(
             f"Unable to generate pack slot {case_id} after {attempts} attempt(s): {reason}"
         )
+
+
+class PackGenerationCancelled(RuntimeError):
+    """Cooperative cancellation of an in-progress pack generation."""
 
 
 def _extract_prompt_text(content: Any) -> str:
@@ -759,9 +775,15 @@ class EvaluationPackGenerator:
     def generate(
         self,
         progress_callback: Callable[[int, int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> EvaluationPack:
+        def is_cancelled() -> bool:
+            return bool(cancel_requested and cancel_requested())
+
         accepted: dict[str, str] = {}
         for index, case in enumerate(self.pack.cases, start=1):
+            if is_cancelled():
+                raise PackGenerationCancelled()
             prior = [
                 prompt
                 for accepted_case in self.pack.cases[: index - 1]
@@ -771,6 +793,8 @@ class EvaluationPackGenerator:
             ]
             last_reason = "no candidate returned"
             for attempt in range(1, self.max_retries + 1):
+                if is_cancelled():
+                    raise PackGenerationCancelled()
                 if progress_callback:
                     progress_callback(
                         index,
@@ -794,6 +818,8 @@ class EvaluationPackGenerator:
                             ),
                         ),
                     )
+                    if is_cancelled():
+                        raise PackGenerationCancelled()
                     extractor = getattr(self.client, "extract_content", None)
                     raw_content = (
                         extractor(response)
@@ -807,6 +833,8 @@ class EvaluationPackGenerator:
                         accepted_prompts=prior,
                     )
                     break
+                except PackGenerationCancelled:
+                    raise
                 except Exception as error:
                     last_reason = str(error) or error.__class__.__name__
             else:
@@ -814,6 +842,8 @@ class EvaluationPackGenerator:
             if progress_callback:
                 progress_callback(index, len(self.pack.cases), f"Accepted {case.case_id}")
 
+        if is_cancelled():
+            raise PackGenerationCancelled()
         model_identifier = str(getattr(getattr(self.client, "config", None), "model", "unknown"))
         provenance = {
             "model_identifier": model_identifier,
@@ -967,6 +997,7 @@ __all__ = [
     "EvaluationPack",
     "EvaluationPackGenerator",
     "PACK_LEVEL_RUBRIC",
+    "PackGenerationCancelled",
     "PackGenerationError",
     "PackExportResult",
     "PromptStyle",
