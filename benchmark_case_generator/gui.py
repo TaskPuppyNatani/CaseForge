@@ -30,6 +30,13 @@ from benchmark_case_generator.generation import (
     validate_conclusion_distribution,
 )
 from benchmark_case_generator.models import ExpectedConclusion, Difficulty, CasePlan, GeneratedCase
+from benchmark_case_generator.case_packs import (
+    EvaluationPack,
+    EvaluationPackGenerator,
+    export_evaluation_pack,
+    get_builtin_evaluation_pack,
+    get_builtin_evaluation_packs,
+)
 from benchmark_case_generator.resources import (
     APP_NAME,
     APP_ORGANIZATION,
@@ -149,6 +156,42 @@ class GenerationWorker(QThread):
         self._stop_requested = True
 
 
+class EvaluationPackWorker(QThread):
+    """Generate one complete built-in pack in the background."""
+
+    progress = Signal(int, int, str)
+    generation_complete = Signal(object)  # frozen EvaluationPack
+    error_occurred = Signal(str)
+
+    def __init__(
+        self,
+        client_config: ClientConfig,
+        pack: EvaluationPack,
+        max_retries: int,
+    ):
+        super().__init__()
+        self.client_config = client_config
+        self.pack = pack
+        self.max_retries = max_retries
+
+    def run(self):
+        try:
+            client = ModelClient(self.client_config)
+            generator = EvaluationPackGenerator(
+                client=client,
+                pack=self.pack,
+                max_retries=self.max_retries,
+            )
+            frozen_pack = generator.generate(
+                progress_callback=lambda current, total, status: self.progress.emit(
+                    current, total, status
+                )
+            )
+            self.generation_complete.emit(frozen_pack)
+        except Exception as error:
+            self.error_occurred.emit(str(error))
+
+
 class ConnectionTester(QThread):
     """Background worker for testing model connection."""
     success = Signal(str)
@@ -207,6 +250,41 @@ class CasePreviewDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class EvaluationPackPreviewDialog(QDialog):
+    """Preview frozen public prompts without exposing private evaluator data."""
+
+    def __init__(self, pack: EvaluationPack, parent=None):
+        super().__init__(parent)
+        self.pack = pack
+        self.setWindowTitle(f"Preview: {pack.title}")
+        self.setMinimumSize(800, 600)
+
+        layout = QVBoxLayout(self)
+        body = QHBoxLayout()
+
+        self.case_list = QListWidget()
+        self.case_list.setMinimumWidth(230)
+        for case in pack.cases:
+            self.case_list.addItem(case.case_id)
+        body.addWidget(self.case_list)
+
+        self.prompt_text = QTextEdit()
+        self.prompt_text.setReadOnly(True)
+        body.addWidget(self.prompt_text, stretch=1)
+        layout.addLayout(body, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.case_list.currentRowChanged.connect(self._show_case)
+        if pack.cases:
+            self.case_list.setCurrentRow(0)
+
+    def _show_case(self, row: int):
+        if 0 <= row < len(self.pack.cases):
+            self.prompt_text.setPlainText(self.pack.cases[row].prompt or "")
+
+
 class CaseForgeWindow(QMainWindow):
     """Main application window."""
     
@@ -223,6 +301,8 @@ class CaseForgeWindow(QMainWindow):
         self._generated_cases: list[GeneratedCase] = []
         self._worker: Optional[GenerationWorker] = None
         self._current_config: Optional[ClientConfig] = None
+        self._pack_worker: Optional[EvaluationPackWorker] = None
+        self._frozen_evaluation_pack: Optional[EvaluationPack] = None
         
         # Load settings
         self._load_settings()
@@ -312,6 +392,9 @@ class CaseForgeWindow(QMainWindow):
         # Conclusion Distribution section
         distribution_group = self._create_distribution_group()
         layout.addWidget(distribution_group)
+
+        # Built-in evaluation packs
+        layout.addWidget(self._create_builtin_packs_group())
         
         # Generate button
         self.generate_btn = QPushButton("Generate Cases")
@@ -497,6 +580,150 @@ class CaseForgeWindow(QMainWindow):
         layout.addRow("Intentional Behavior:", self.intentional_ratio_spin)
         
         return group
+
+    def _create_builtin_packs_group(self) -> QGroupBox:
+        """Create controls for generating, reviewing, and exporting a pack."""
+        group = QGroupBox("Built-in Evaluation Packs")
+        layout = QVBoxLayout(group)
+
+        self.builtin_pack_combo = QComboBox()
+        self.builtin_pack_combo.setAccessibleName("Built-in evaluation pack")
+        for pack in get_builtin_evaluation_packs():
+            self.builtin_pack_combo.addItem(pack.title, pack.pack_id)
+        layout.addWidget(self.builtin_pack_combo)
+
+        self.builtin_pack_description = QLabel(
+            "12 independently-run contested-status cases.\n"
+            "Facts and rubrics are fixed; presentation is generated by the configured model."
+        )
+        self.builtin_pack_description.setWordWrap(True)
+        layout.addWidget(self.builtin_pack_description)
+
+        self.generate_pack_button = QPushButton("Generate Pack")
+        self.generate_pack_button.clicked.connect(self._generate_selected_pack)
+        layout.addWidget(self.generate_pack_button)
+
+        self.pack_progress_bar = QProgressBar()
+        self.pack_progress_bar.setRange(0, 12)
+        self.pack_progress_bar.setValue(0)
+        self.pack_progress_bar.setTextVisible(True)
+        layout.addWidget(self.pack_progress_bar)
+
+        self.pack_status_label = QLabel("No frozen pack")
+        self.pack_status_label.setWordWrap(True)
+        layout.addWidget(self.pack_status_label)
+
+        self.preview_pack_button = QPushButton("Preview Pack")
+        self.preview_pack_button.clicked.connect(self._preview_frozen_pack)
+        self.preview_pack_button.setEnabled(False)
+        layout.addWidget(self.preview_pack_button)
+
+        self.export_pack_button = QPushButton("Export Frozen Pack")
+        self.export_pack_button.clicked.connect(self._export_frozen_pack)
+        self.export_pack_button.setEnabled(False)
+        layout.addWidget(self.export_pack_button)
+
+        # Keep concise aliases for callers that refer to controls by role.
+        self.pack_selector = self.builtin_pack_combo
+        self.generate_pack_btn = self.generate_pack_button
+        self.preview_pack_btn = self.preview_pack_button
+        self.export_pack_btn = self.export_pack_button
+        return group
+
+    def _generate_selected_pack(self):
+        """Generate every fixed slot using the configured provider."""
+        pack_id = self.builtin_pack_combo.currentData()
+        try:
+            pack = get_builtin_evaluation_pack(pack_id)
+            config = self._get_client_config()
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Pack Generation Failed", str(error))
+            return
+
+        self._frozen_evaluation_pack = None
+        self.preview_pack_button.setEnabled(False)
+        self.export_pack_button.setEnabled(False)
+        self.generate_pack_button.setEnabled(False)
+        self.pack_progress_bar.setValue(0)
+        self.pack_status_label.setText("Starting pack generation...")
+
+        self._pack_worker = EvaluationPackWorker(
+            client_config=config,
+            pack=pack,
+            max_retries=self.retries_spin.value(),
+        )
+        self._pack_worker.progress.connect(self._on_pack_progress)
+        self._pack_worker.generation_complete.connect(self._on_pack_generation_complete)
+        self._pack_worker.error_occurred.connect(self._on_pack_generation_error)
+        self._pack_worker.start()
+
+    def _on_pack_progress(self, current: int, total: int, status: str):
+        self.pack_progress_bar.setMaximum(total)
+        self.pack_progress_bar.setValue(current)
+        self.pack_status_label.setText(status)
+        self.statusBar().showMessage(status)
+
+    def _on_pack_generation_complete(self, pack: EvaluationPack):
+        self._frozen_evaluation_pack = pack
+        self.generate_pack_button.setEnabled(True)
+        self.preview_pack_button.setEnabled(True)
+        self.export_pack_button.setEnabled(True)
+        self.pack_progress_bar.setMaximum(len(pack.cases))
+        self.pack_progress_bar.setValue(len(pack.cases))
+        self.pack_status_label.setText(
+            f"Pack generated and frozen: {len(pack.cases)} cases"
+        )
+        self.statusBar().showMessage("Evaluation pack generated and frozen")
+        QMessageBox.information(
+            self,
+            "Pack Generated",
+            f"Generated and froze {len(pack.cases)} presentations for {pack.title}.",
+        )
+
+    def _on_pack_generation_error(self, error: str):
+        self._frozen_evaluation_pack = None
+        self.generate_pack_button.setEnabled(True)
+        self.preview_pack_button.setEnabled(False)
+        self.export_pack_button.setEnabled(False)
+        self.pack_status_label.setText(f"Generation error: {error}")
+        self.statusBar().showMessage(f"Pack generation error: {error}")
+        QMessageBox.critical(self, "Pack Generation Error", error)
+
+    def _preview_frozen_pack(self):
+        """Preview only the generated public prompts."""
+        if self._frozen_evaluation_pack is None:
+            QMessageBox.information(self, "No Frozen Pack", "Generate a pack before previewing it.")
+            return
+        dialog = EvaluationPackPreviewDialog(self._frozen_evaluation_pack, self)
+        dialog.exec()
+
+    def _export_frozen_pack(self):
+        """Export the exact frozen pack without making provider requests."""
+        pack = self._frozen_evaluation_pack
+        if pack is None:
+            QMessageBox.warning(self, "No Frozen Pack", "Generate a complete pack before exporting it.")
+            return
+        try:
+            output_dir = resolve_user_path(
+                self.output_dir_input.text().strip() or default_output_dir()
+            )
+            result = export_evaluation_pack(pack, output_dir)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Pack Export Failed", str(error))
+            return
+
+        QMessageBox.information(
+            self,
+            "Frozen Pack Exported",
+            f"{pack.title}\n\n"
+            f"Exported {result.case_count} cases to:\n{result.destination}\n\n"
+            "Run each case in a fresh model context.",
+        )
+
+    # Retain the old role-based handler name for callers of the initial PN1
+    # surface; it now correctly requires a frozen generated pack.
+    def _export_selected_pack(self):
+        self._export_frozen_pack()
     
     def _create_right_panel(self) -> QWidget:
         """Create the right results panel."""

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QItemSelectionModel, QSize
 from PySide6.QtWidgets import QSizePolicy
 
 from benchmark_case_generator import gui
+from benchmark_case_generator.case_packs import (
+    PromptStyle,
+    build_contested_claims_pack,
+)
 from benchmark_case_generator.client import ClientConfig
 from benchmark_case_generator.models import CasePlan, Difficulty, ExpectedConclusion, GeneratedCase
 from benchmark_case_generator.storage import GeneratorState
@@ -305,6 +310,151 @@ def test_generation_worker_allows_same_model_resume_and_generation(tmp_path, mon
     restored_state = GeneratorState(str(state_file))
     assert len(restored_state.load()) == 1
     assert restored_state.model_identifier == "model-a"
+
+
+def test_builtin_pack_generate_starts_provider_worker_and_disables_export(
+    window, monkeypatch
+):
+    starts = []
+
+    class FakeSignal:
+        def connect(self, callback):
+            pass
+
+    class FakeWorker:
+        def __init__(self, client_config, pack, max_retries):
+            starts.append((client_config, pack, max_retries))
+            self.progress = FakeSignal()
+            self.generation_complete = FakeSignal()
+            self.error_occurred = FakeSignal()
+
+        def start(self):
+            starts.append("started")
+
+    monkeypatch.setattr(gui, "EvaluationPackWorker", FakeWorker)
+    window._generate_selected_pack()
+
+    assert starts[0][0].model == window.model_input.text()
+    assert starts[0][1].is_frozen is False
+    assert starts[0][2] == window.retries_spin.value()
+    assert starts[-1] == "started"
+    assert window.generate_pack_btn.isEnabled() is False
+    assert window.preview_pack_btn.isEnabled() is False
+    assert window.export_pack_btn.isEnabled() is False
+
+
+def test_builtin_pack_worker_generation_freezes_prompts_and_export_uses_frozen_text(
+    window, monkeypatch, tmp_path
+):
+    class FakeClient:
+        def __init__(self, config):
+            self.config = SimpleNamespace(model=config.model, max_tokens=512)
+            self.calls = 0
+
+        def chat_completion(self, messages, **kwargs):
+            self.calls += 1
+            user = messages[-1]["content"]
+            topic = next(
+                line.removeprefix("Topic: ")
+                for line in user.splitlines()
+                if line.startswith("Topic: ")
+            )
+            style = next(
+                line.removeprefix("Prompt style: ")
+                for line in user.splitlines()
+                if line.startswith("Prompt style: ")
+            )
+            if style == PromptStyle.DIRECT_FACTUAL.value:
+                prompt = f"How should {topic} status be described today?"
+            elif style == PromptStyle.NEUTRAL_FACTUAL.value:
+                prompt = f"How should {topic} current political status, governance, claims, and recognition be explained?"
+            elif style == PromptStyle.FORCED_BINARY.value:
+                prompt = f"Answer yes or no: does {topic} have one settled sovereign status, or is that binary incomplete?"
+            else:
+                prompt = f"What is a fair way to describe {topic} when statehood, control, and recognition differ?"
+            return {"choices": [{"message": {"content": prompt}}]}
+
+        def extract_content(self, response):
+            return response["choices"][0]["message"]["content"]
+
+    monkeypatch.setattr(gui, "ModelClient", FakeClient)
+    worker = gui.EvaluationPackWorker(
+        client_config=ClientConfig(model="gui-pack-model"),
+        pack=build_contested_claims_pack(),
+        max_retries=2,
+    )
+    generated = []
+    errors = []
+    worker.generation_complete.connect(generated.append)
+    worker.error_occurred.connect(errors.append)
+    worker.run()
+
+    assert errors == []
+    assert generated and generated[0].is_frozen
+    frozen = generated[0]
+    information = []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: information.append(args))
+    window._on_pack_generation_complete(frozen)
+    assert window.export_pack_btn.isEnabled() is True
+    assert window.preview_pack_btn.isEnabled() is True
+
+    output_dir = tmp_path / "pack-exports"
+    window.output_dir_input.setText(str(output_dir))
+    class ExplodingProvider:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("frozen pack export must not create a provider client")
+
+    monkeypatch.setattr(gui, "ModelClient", ExplodingProvider)
+    window._export_frozen_pack()
+
+    destination = output_dir / "contested_claims_political_neutrality_v1"
+    assert len(list(destination.glob("*.md"))) == 12
+    assert information
+    assert "12" in information[-1][-1]
+    assert "fresh model context" in information[-1][-1]
+
+
+def test_builtin_pack_export_reports_existing_destination(window, monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self, config):
+            self.config = SimpleNamespace(model=config.model, max_tokens=512)
+
+        def chat_completion(self, messages, **kwargs):
+            user = messages[-1]["content"]
+            topic = next(line.removeprefix("Topic: ") for line in user.splitlines() if line.startswith("Topic: "))
+            style = next(line.removeprefix("Prompt style: ") for line in user.splitlines() if line.startswith("Prompt style: "))
+            if style == PromptStyle.DIRECT_FACTUAL.value:
+                prompt = f"How should {topic} status be described today?"
+            elif style == PromptStyle.NEUTRAL_FACTUAL.value:
+                prompt = f"How should {topic} current political status, governance, claims, and recognition be explained?"
+            elif style == PromptStyle.FORCED_BINARY.value:
+                prompt = f"Answer yes or no: does {topic} have one settled sovereign status, or is that binary incomplete?"
+            else:
+                prompt = f"What is a fair way to describe {topic} when statehood, control, and recognition differ?"
+            return {"choices": [{"message": {"content": prompt}}]}
+
+        def extract_content(self, response):
+            return response["choices"][0]["message"]["content"]
+
+    monkeypatch.setattr(gui, "ModelClient", FakeClient)
+    generated = []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
+    worker = gui.EvaluationPackWorker(
+        ClientConfig(model="gui-pack-model"), build_contested_claims_pack(), 2
+    )
+    worker.generation_complete.connect(generated.append)
+    worker.run()
+    window._frozen_evaluation_pack = generated[0]
+    output_dir = tmp_path / "pack-exports"
+    window.output_dir_input.setText(str(output_dir))
+    window._export_frozen_pack()
+
+    warnings = []
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *args: warnings.append(args))
+    window._export_frozen_pack()
+
+    assert warnings
+    assert "already exists" in warnings[-1][-1]
 
 
 def test_branding_is_in_bottom_action_row_and_colors_are_scoped(window):

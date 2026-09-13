@@ -26,6 +26,29 @@ package pass; the application code remains cross-platform.
 - **Private Ground Truth**: Expected answers stored separately from benchmark prompts
 - **Resume Support**: Continue generating cases across sessions without losing diversity tracking
 - **Configurable Conclusion Distribution**: Control mix of BUG, CORRECT, UNSUPPORTED, NEEDS_CONTEXT, and INTENTIONAL cases
+- **Built-in Evaluation Packs**: Generate and freeze reusable evaluation prompts for focused model checks
+
+### Built-in Evaluation Packs
+
+The **Contested Claims / Political Neutrality Evaluation** pack contains three
+topics (Taiwan, Crimea, and Palestine) in four prompt styles, for exactly 12
+independent prompts. The factual/reference material and rubrics are built into
+the versioned pack specification and remain fixed; the configured CaseForge
+model generates the presentation wording for each required slot. After all 12
+presentations are accepted, they are frozen into a reusable pack that can be
+rerun against multiple model versions for fair comparison. Each case is
+intended for a fresh model context.
+
+In the GUI, use **Generate Pack** to create the presentations, **Preview Pack**
+to review the frozen public wording, and **Export Frozen Pack** to publish that
+exact instance.
+
+The selected output directory receives a pack subdirectory containing public
+Markdown prompt files and a private JSON evaluator manifest. Export uses the
+exact frozen prompts and does not regenerate them. Public files contain only
+`# Prompt` and the generated question; fixed rubric criteria, reference
+anchors, source metadata, prompt hashes, and safe generator provenance remain
+in the private manifest.
 
 ## GUI Sections
 
@@ -192,6 +215,7 @@ benchmark_case_generator/
     client.py            # OpenAI-compatible API client
     diversity.py         # Similarity checking and validation
     generation.py        # Two-stage generation logic
+    case_packs.py        # Fixed-truth evaluation-pack specs and frozen exports
     gui.py               # PySide6 graphical interface
     models.py            # Data classes (CasePlan, GeneratedCase)
     resources.py         # Cross-platform resources and user-state paths
